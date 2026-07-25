@@ -42,6 +42,72 @@ def test_frontend_upload_lifecycle(tmp_path):
         assert asset.json()["status"] == "ready"
 
 
+def test_completed_upload_is_claimed_once_by_the_worker(tmp_path):
+    with client(tmp_path) as api:
+        user = {"X-User-Id": "demo-user"}
+        initiated = api.post(
+            "/api/v1/uploads/initiate",
+            headers=user,
+            json={"organization_id": "demo-org", "original_filename": "queue-me.mp4", "media_type": "video"},
+        ).json()
+        assert api.post(
+            f"/api/v1/uploads/{initiated['upload_id']}/complete",
+            headers=user,
+            json={"byte_size": 1234},
+        ).status_code == 200
+
+        worker = {"X-Internal-Token": "worker-secret"}
+        claimed = api.post("/api/v1/internal/workflows/ingest", headers=worker, json={"worker_id": "demo-worker", "limit": 1})
+        assert claimed.status_code == 200
+        assert claimed.json()["jobs"] == [{
+            "asset_id": initiated["asset_id"],
+            "job_id": initiated["upload_id"],
+            "organization_id": "demo-org",
+            "upload_key": initiated["upload_key"],
+            "original_filename": "queue-me.mp4",
+            "media_type": "video",
+            "byte_size": 1234,
+        }]
+        assert api.post("/api/v1/internal/workflows/ingest/claim", headers=worker, json={}).json() == {"jobs": []}
+
+        job = api.get(f"/api/v1/assets/{initiated['asset_id']}/processing-job", headers=user)
+        assert job.json()["stage"] == "preparing_file"
+        assert job.json()["status"] == "processing"
+        assert job.json()["progress"] == 15
+
+
+def test_checksum_deduplication_and_provider_id_persistence(tmp_path):
+    with client(tmp_path) as api:
+        user = {"X-User-Id": "demo-user"}
+        checksum = "a" * 64
+        first = api.post(
+            "/api/v1/uploads/initiate",
+            headers=user,
+            json={"organization_id": "demo-org", "original_filename": "first.mp4", "media_type": "video"},
+        ).json()
+        assert api.post(f"/api/v1/uploads/{first['upload_id']}/complete", headers=user, json={"checksum_sha256": checksum}).status_code == 200
+
+        worker = {"X-Internal-Token": "worker-secret"}
+        updated = api.patch(
+            f"/api/v1/internal/assets/{first['asset_id']}/processing",
+            headers=worker,
+            json={"stage": "preparing_file", "status": "processing", "progress": 15, "provider_asset_id": "mux-asset-123"},
+        )
+        assert updated.status_code == 200
+        first_asset = api.get(f"/api/v1/assets/{first['asset_id']}", headers=user).json()
+        assert first_asset["checksum_sha256"] == checksum
+        assert first_asset["provider_asset_id"] == "mux-asset-123"
+
+        second = api.post(
+            "/api/v1/uploads/initiate",
+            headers=user,
+            json={"organization_id": "demo-org", "original_filename": "duplicate.mp4", "media_type": "video"},
+        ).json()
+        duplicate = api.post(f"/api/v1/uploads/{second['upload_id']}/complete", headers=user, json={"checksum_sha256": checksum.upper()})
+        assert duplicate.status_code == 409
+        assert duplicate.json()["code"] == "duplicate_asset"
+
+
 def test_upload_abort_is_authorized_and_terminal(tmp_path):
     with client(tmp_path) as api:
         initiated = api.post("/api/v1/uploads/initiate", headers={"X-User-Id": "demo-user"}, json={"organization_id": "demo-org", "original_filename": "cancel-me.mp4", "media_type": "video"})
@@ -146,6 +212,7 @@ def test_search_and_collections_are_scoped_to_authenticated_organization(tmp_pat
         assert search.status_code == 200
         result = search.json()["results"][0]
         assert result["asset_id"] == "customer-story"
+        assert result["asset_name"] == "acme_interview_final_v3.mp4"
         assert result["match_reasons"]
 
         created = api.post("/api/v1/collections", headers=headers, json={"name": "Customer voice", "description": "Useful proof points"})
