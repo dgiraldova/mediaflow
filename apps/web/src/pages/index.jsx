@@ -23,7 +23,7 @@ import {
   WandSparkles,
   X,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { MediaArtwork, MediaCard } from "../components/MediaCard";
 import { StatusPill } from "../components/StatusPill";
@@ -37,6 +37,13 @@ import {
   transcript,
 } from "../lib/demo-data";
 import { api } from "../lib/api";
+import {
+  formatTimestamp,
+  toAssetViewModel,
+  toMomentViewModel,
+  toSearchResultViewModel,
+  toTranscriptViewModel,
+} from "../lib/live-adapters";
 import { useAuth } from "../state/auth-context";
 
 export const LoginPage = () => {
@@ -360,11 +367,45 @@ export const SearchPage = () => {
   const [query, setQuery] = useState(initialQuery);
   const [submittedQuery, setSubmittedQuery] = useState(initialQuery);
   const [filterOpen, setFilterOpen] = useState(false);
+  const liveApi = import.meta.env.VITE_DEMO_MODE === "false";
+  const [results, setResults] = useState(liveApi ? [] : searchResults);
+  const [searchId, setSearchId] = useState(null);
+  const [loading, setLoading] = useState(liveApi);
+  const [error, setError] = useState("");
+
+  const performSearch = useCallback(
+    async (nextQuery) => {
+      if (!liveApi) {
+        setResults(searchResults);
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+      try {
+        const response = await api.search.query({ query: nextQuery });
+        setSearchId(response.search_id);
+        setResults(response.results.map(toSearchResultViewModel));
+      } catch (searchError) {
+        setResults([]);
+        setError(searchError.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [liveApi],
+  );
+
+  useEffect(() => {
+    performSearch(submittedQuery);
+  }, [performSearch, submittedQuery]);
 
   const submitSearch = (event) => {
     event.preventDefault();
-    setSubmittedQuery(query);
-    setSearchParams({ q: query });
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) return;
+    setSubmittedQuery(normalizedQuery);
+    setSearchParams({ q: normalizedQuery });
   };
 
   return (
@@ -405,7 +446,9 @@ export const SearchPage = () => {
       <section className="search-results-section">
         <div className="results-heading">
           <div>
-            <span className="eyebrow">3 moments found</span>
+            <span className="eyebrow">
+              {loading ? "Searching live library" : `${results.length} moments found`}
+            </span>
             <h2>
               Best matches for <q>{submittedQuery}</q>
             </h2>
@@ -430,8 +473,39 @@ export const SearchPage = () => {
           </div>
         )}
 
-        <div className="search-result-list">
-          {searchResults.map((result, index) => (
+        {error && (
+          <div className="request-state error-state" role="alert">
+            <div>
+              <strong>Search is temporarily unavailable</strong>
+              <p>{error}</p>
+            </div>
+            <button className="button secondary small" type="button" onClick={() => performSearch(submittedQuery)}>
+              Try again
+            </button>
+          </div>
+        )}
+
+        {loading && (
+          <div className="request-state loading-state" aria-live="polite">
+            <span className="loading-spinner" />
+            <div>
+              <strong>Searching transcripts and moments</strong>
+              <p>Asking the live organization-scoped API for the strongest matches…</p>
+            </div>
+          </div>
+        )}
+
+        {!loading && !error && results.length === 0 && (
+          <div className="empty-state search-empty-state">
+            <Search size={24} />
+            <h2>No live moments matched</h2>
+            <p>Try a shorter phrase such as “easy onboarding” or “customer story.”</p>
+          </div>
+        )}
+
+        {!loading && !error && results.length > 0 && (
+          <div className="search-result-list" data-search-id={searchId ?? undefined}>
+            {results.map((result, index) => (
             <article className="search-result-card" key={result.id}>
               <div
                 className="result-preview"
@@ -464,7 +538,7 @@ export const SearchPage = () => {
                 <div className="result-actions">
                   <Link
                     className="button secondary small"
-                    to={`/library/assets/${result.assetId}?t=${result.timestamp}`}
+                    to={`/library/assets/${result.assetId}?start=${result.startMs}`}
                   >
                     <Play size={14} /> Open at {result.timestamp}
                   </Link>
@@ -482,8 +556,9 @@ export const SearchPage = () => {
                 </div>
               </div>
             </article>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
     </>
   );
@@ -491,15 +566,104 @@ export const SearchPage = () => {
 
 export const AssetPage = () => {
   const { assetId } = useParams();
-  const asset = assets.find((item) => item.id === assetId) ?? assets[0];
-  const [activeStart, setActiveStart] = useState(31_000);
+  const [assetSearchParams] = useSearchParams();
+  const requestedStartParam = assetSearchParams.get("start");
+  const requestedStart = requestedStartParam === null ? Number.NaN : Number(requestedStartParam);
+  const demoAsset = assets.find((item) => item.id === assetId) ?? assets[0];
+  const liveApi = import.meta.env.VITE_DEMO_MODE === "false";
+  const [asset, setAsset] = useState(liveApi ? null : demoAsset);
+  const [assetTranscript, setAssetTranscript] = useState(liveApi ? [] : transcript);
+  const [assetMoments, setAssetMoments] = useState(liveApi ? [] : moments);
+  const [activeStart, setActiveStart] = useState(
+    Number.isFinite(requestedStart) && requestedStart >= 0 ? requestedStart : 31_000,
+  );
   const [tab, setTab] = useState("transcript");
+  const [loading, setLoading] = useState(liveApi);
+  const [error, setError] = useState("");
   const playerRef = useRef(null);
+
+  const loadAsset = useCallback(async () => {
+    if (!liveApi) {
+      setAsset(demoAsset);
+      setAssetTranscript(transcript);
+      setAssetMoments(moments);
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const [assetResponse, transcriptResponse, momentsResponse] = await Promise.all([
+        api.assets.get(assetId),
+        api.assets.transcript(assetId),
+        api.assets.moments(assetId),
+      ]);
+      const mappedMoments = momentsResponse.map(toMomentViewModel);
+      const mappedAsset = toAssetViewModel(assetResponse);
+      setAsset({
+        ...mappedAsset,
+        moments: mappedMoments.length,
+        description:
+          mappedMoments.length > 0
+            ? `Live analysis identified ${mappedMoments.length} purposeful moments, including “${mappedMoments[0].title}.”`
+            : mappedAsset.description,
+      });
+      setAssetTranscript(transcriptResponse.map(toTranscriptViewModel));
+      setAssetMoments(mappedMoments);
+      if (!(Number.isFinite(requestedStart) && requestedStart >= 0) && mappedMoments[0]) {
+        setActiveStart(mappedMoments[0].startMs);
+      }
+    } catch (assetError) {
+      setError(assetError.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [assetId, demoAsset, liveApi, requestedStart]);
+
+  useEffect(() => {
+    loadAsset();
+  }, [loadAsset]);
 
   const seek = (startMs) => {
     setActiveStart(startMs);
     playerRef.current?.focus();
   };
+
+  if (loading) {
+    return (
+      <>
+        <Link className="back-link" to="/library">
+          <ArrowLeft size={16} /> Back to library
+        </Link>
+        <div className="request-state loading-state asset-request-state" aria-live="polite">
+          <span className="loading-spinner" />
+          <div>
+            <strong>Loading live asset analysis</strong>
+            <p>Fetching metadata, transcript segments, and purposeful moments…</p>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (error || !asset) {
+    return (
+      <>
+        <Link className="back-link" to="/library">
+          <ArrowLeft size={16} /> Back to library
+        </Link>
+        <div className="request-state error-state asset-request-state" role="alert">
+          <div>
+            <strong>We could not load this asset</strong>
+            <p>{error || "The live API returned no asset."}</p>
+          </div>
+          <button className="button secondary small" type="button" onClick={loadAsset}>
+            Try again
+          </button>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -537,12 +701,18 @@ export const AssetPage = () => {
               <button type="button" aria-label="Play">
                 <Play size={15} fill="currentColor" />
               </button>
-              <span>{Math.floor(activeStart / 60_000).toString().padStart(2, "0")}:</span>
-              <span>{Math.floor((activeStart % 60_000) / 1000).toString().padStart(2, "0")}</span>
+              <span>{formatTimestamp(activeStart)}</span>
               <div className="player-track">
-                <span style={{ width: `${Math.max(4, (activeStart / (18.7 * 60_000)) * 100)}%` }} />
+                <span
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(4, (activeStart / (asset.durationMs || 18.7 * 60_000)) * 100),
+                    )}%`,
+                  }}
+                />
               </div>
-              <span>18:42</span>
+              <span>{asset.duration}</span>
             </div>
           </div>
 
@@ -564,10 +734,10 @@ export const AssetPage = () => {
                 <span className="eyebrow">Purposeful moments</span>
                 <h2>Best parts of this video</h2>
               </div>
-              <span>{moments.length} of 12 shown</span>
+              <span>{assetMoments.length} live moments</span>
             </div>
             <div className="moment-list">
-              {moments.map((moment) => (
+              {assetMoments.map((moment) => (
                 <button className="moment-card" type="button" key={moment.id} onClick={() => seek(moment.startMs)}>
                   <span className="moment-play">
                     <Play size={14} fill="currentColor" />
@@ -611,13 +781,13 @@ export const AssetPage = () => {
                 <input placeholder="Search transcript..." aria-label="Search transcript" />
               </label>
               <div className="transcript-list">
-                {transcript.map((segment) => (
+                {assetTranscript.map((segment) => (
                   <button
                     className={`transcript-segment ${
                       activeStart === segment.startMs ? "active" : ""
                     }`}
                     type="button"
-                    key={segment.startMs}
+                    key={segment.id ?? segment.startMs}
                     onClick={() => seek(segment.startMs)}
                   >
                     <span className="transcript-time">{segment.time}</span>
@@ -645,7 +815,7 @@ export const AssetPage = () => {
               </div>
               <div>
                 <dt>Resolution</dt>
-                <dd>3840 × 2160</dd>
+                <dd>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "Pending"}</dd>
               </div>
               <div>
                 <dt>Language</dt>

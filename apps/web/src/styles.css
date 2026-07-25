@@ -1000,6 +1000,64 @@ h3,
   margin-top: 5px;
 }
 
+.request-state {
+  min-height: 76px;
+  border: 1px solid #dde4df;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 16px 18px;
+  color: #52615c;
+  background: white;
+}
+
+.request-state > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.request-state strong {
+  color: #2e3c38;
+  font-family: "Manrope", sans-serif;
+  font-size: 12px;
+}
+
+.request-state p {
+  margin-top: 4px;
+  color: #7e8985;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.loading-spinner {
+  width: 23px;
+  height: 23px;
+  flex: none;
+  border: 2px solid #dbe5df;
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+
+.error-state {
+  border-color: #eed5d1;
+  background: #fffafa;
+}
+
+.error-state strong {
+  color: #8d4037;
+}
+
+.search-empty-state {
+  min-height: 235px;
+}
+
+.asset-request-state {
+  min-height: 150px;
+  margin-top: 22px;
+}
+
 /* Dialogs */
 
 .dialog-backdrop {

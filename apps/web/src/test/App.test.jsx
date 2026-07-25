@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "../App";
+import { api } from "../lib/api";
 import { AuthProvider } from "../state/AuthContext";
 
 const renderApp = (route = "/library") =>
@@ -40,5 +41,75 @@ describe("MediaFlow frontend", () => {
 
     expect(screen.getByRole("heading", { name: "Customer story — Acme" })).toBeInTheDocument();
     expect(screen.getByText(/best parts of this video/i)).toBeInTheDocument();
+  });
+
+  it("renders Search results returned by the live API", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    window.localStorage.setItem("mediaflow.access_token", "signed.jwt");
+    vi.spyOn(api.search, "query").mockResolvedValue({
+      search_id: "search-live",
+      results: [
+        {
+          asset_id: "customer-story",
+          moment_id: "live-moment",
+          title: "Live onboarding result",
+          start_ms: 31_000,
+          end_ms: 53_000,
+          excerpt: "This excerpt came from the API.",
+          match_reasons: ["Matched live transcript"],
+          score: 0.97,
+        },
+      ],
+    });
+
+    renderApp("/search?q=easy+onboarding");
+
+    expect(await screen.findByText("Live onboarding result")).toBeInTheDocument();
+    expect(screen.getByText(/this excerpt came from the api/i)).toBeInTheDocument();
+    expect(api.search.query).toHaveBeenCalledWith({ query: "easy onboarding" });
+  });
+
+  it("hydrates Asset Detail from live metadata, transcript, and moments", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    window.localStorage.setItem("mediaflow.access_token", "signed.jwt");
+    vi.spyOn(api.assets, "get").mockResolvedValue({
+      id: "customer-story",
+      organization_id: "demo-org",
+      original_filename: "customer_story_live.mp4",
+      media_type: "video",
+      status: "ready",
+      byte_size: 2_400_000,
+      duration_ms: 112_000,
+      width: 1920,
+      height: 1080,
+    });
+    vi.spyOn(api.assets, "transcript").mockResolvedValue([
+      {
+        id: "segment-live",
+        start_ms: 31_000,
+        end_ms: 48_000,
+        speaker: "Maya",
+        text: "This transcript segment came from Postgres.",
+      },
+    ]);
+    vi.spyOn(api.assets, "moments").mockResolvedValue([
+      {
+        id: "moment-live",
+        title: "Live purposeful moment",
+        start_ms: 31_000,
+        end_ms: 53_000,
+        category: "Testimonial",
+        score: 96,
+      },
+    ]);
+
+    renderApp("/library/assets/customer-story?start=31000");
+
+    expect(
+      await screen.findByRole("heading", { name: "Customer Story Live" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Live purposeful moment")).toBeInTheDocument();
+    expect(screen.getByText(/came from Postgres/i)).toBeInTheDocument();
+    expect(api.assets.get).toHaveBeenCalledWith("customer-story");
   });
 });
