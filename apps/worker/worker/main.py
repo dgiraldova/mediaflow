@@ -21,8 +21,10 @@ from temporalio.worker import Worker
 
 from worker.activities.compensation import CompensationActivities
 from worker.activities.deps import ActivityDependencies
+from worker.activities.export import ExportActivities
 from worker.activities.ingestion import IngestionActivities
 from worker.config import WorkerSettings, get_settings
+from worker.google_drive.oauth import GoogleDriveOAuth
 from worker.logging import configure_logging, get_logger
 from worker.providers.classification import (
     NullClassificationProvider,
@@ -42,6 +44,7 @@ from worker.repositories.memory import (
     InMemoryTranscriptRepository,
 )
 from worker.storage.r2_client import R2Client
+from worker.workflows.export_clip import ExportClipWorkflow
 from worker.workflows.ingest_asset import IngestAssetWorkflow
 
 logger = get_logger(__name__)
@@ -116,9 +119,23 @@ def build_dependencies(settings: WorkerSettings) -> ActivityDependencies:
         moment_repo = InMemoryMomentRepository()
         logger.warning("repositories.using_in_memory_fallback")
 
+    # Google Drive ingestion additionally needs a source_connections table,
+    # which Member B has not shipped yet; until then the OAuth client exists
+    # but no connection can be resolved.
+    google_drive_oauth = (
+        GoogleDriveOAuth(
+            client_id=settings.google_drive.client_id,
+            client_secret=settings.google_drive.client_secret,
+            redirect_uri=settings.google_drive.redirect_uri,
+        )
+        if settings.google_drive.client_id
+        else None
+    )
+
     return ActivityDependencies(
         settings=settings,
         storage=storage,
+        google_drive_oauth=google_drive_oauth,
         asset_repository=asset_repo,
         processing_job_repository=job_repo,
         transcript_repository=transcript_repo,
@@ -138,6 +155,7 @@ async def run_worker() -> None:
     deps = build_dependencies(settings)
     ingestion_activities = IngestionActivities(deps)
     compensation_activities = CompensationActivities(deps)
+    export_activities = ExportActivities(deps)
 
     client = await Client.connect(
         settings.temporal.host,
@@ -149,7 +167,7 @@ async def run_worker() -> None:
     worker = Worker(
         client,
         task_queue=settings.temporal.task_queue,
-        workflows=[IngestAssetWorkflow],
+        workflows=[IngestAssetWorkflow, ExportClipWorkflow],
         activities=[
             ingestion_activities.validate_asset,
             ingestion_activities.acquire_source_file,
@@ -170,6 +188,11 @@ async def run_worker() -> None:
             compensation_activities.mark_asset_failed,
             compensation_activities.delete_partial_derivatives,
             compensation_activities.release_temporary_resources,
+            export_activities.validate_clip_range,
+            export_activities.render_clip,
+            export_activities.mark_clip_export_ready,
+            export_activities.mark_clip_export_failed,
+            export_activities.cleanup_export_files,
         ],
     )
 

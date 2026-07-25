@@ -254,5 +254,57 @@ class DeletePartialDerivativesInput:
 
 
 @dataclass(slots=True)
+class ExportClipWorkflowInput:
+    organization_id: str
+    clip_export_id: str
+    asset_id: str
+    start_ms: int
+    end_ms: int
+    source_storage_key: str
+    source_moment_id: str | None = None
+
+
+@dataclass(slots=True)
+class ExportClipWorkflowResult:
+    clip_export_id: str
+    status: str
+    output_storage_key: str | None = None
+    duration_ms: int = 0
+    error_code: str | None = None
+
+
+@dataclass(slots=True)
+class RenderClipInput:
+    organization_id: str
+    clip_export_id: str
+    asset_id: str
+    start_ms: int
+    end_ms: int
+    source_storage_key: str
+
+
+@dataclass(slots=True)
+class RenderClipResult:
+    output_storage_key: str
+    duration_ms: int
+    byte_size: int
+
+
+@dataclass(slots=True)
+class MarkClipExportReadyInput:
+    organization_id: str
+    clip_export_id: str
+    output_storage_key: str
+    output_mime_type: str
+
+
+@dataclass(slots=True)
+class MarkClipExportFailedInput:
+    organization_id: str
+    clip_export_id: str
+    error_message: str
+
+
+@dataclass(slots=True)
 class ReleaseTemporaryResourcesInput:
     temp_dir: str

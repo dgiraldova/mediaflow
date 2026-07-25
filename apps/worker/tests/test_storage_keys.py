@@ -9,9 +9,7 @@ ASSET = "22222222-2222-2222-2222-222222222222"
 
 
 def test_keys_are_namespaced_by_organization_first():
-    key = build_storage_key(
-        StorageKeyKind.PROXY, organization_id=ORG, asset_id=ASSET
-    )
+    key = build_storage_key(StorageKeyKind.PROXY, organization_id=ORG, asset_id=ASSET)
     assert key.startswith(f"orgs/{ORG}/")
 
 
@@ -64,9 +62,7 @@ def test_preview_thumbnail_key_is_zero_padded():
 
 def test_preview_thumbnail_requires_index():
     with pytest.raises(ValueError, match="preview_index"):
-        build_storage_key(
-            StorageKeyKind.THUMBNAIL_PREVIEW, organization_id=ORG, asset_id=ASSET
-        )
+        build_storage_key(StorageKeyKind.THUMBNAIL_PREVIEW, organization_id=ORG, asset_id=ASSET)
 
 
 def test_clip_export_key_requires_export_id():

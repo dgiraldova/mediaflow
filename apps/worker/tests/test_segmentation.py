@@ -46,7 +46,9 @@ def test_long_silence_gap_creates_a_boundary():
 def test_speaker_change_creates_a_boundary():
     segments = [
         Segment(0, 8_000, "Tell me about the rollout.", speaker_label="interviewer"),
-        Segment(8_100, 18_000, "Implementation was easier than expected.", speaker_label="customer"),
+        Segment(
+            8_100, 18_000, "Implementation was easier than expected.", speaker_label="customer"
+        ),
     ]
     candidates = generate_candidate_moments(segments)
     assert len(candidates) == 2

@@ -50,6 +50,8 @@ from worker.activities.types import (
 )
 from worker.domain.enums import AssetStatus, MomentType, ProcessingStage
 from worker.domain.models import MediaMomentDraft, TranscriptSegmentDraft
+from worker.google_drive.client import DriveClient
+from worker.google_drive.oauth import DriveCredentials, TokenRefreshRequired
 from worker.logging import get_logger
 from worker.media.ffmpeg import extract_audio as ffmpeg_extract_audio
 from worker.media.ffmpeg import generate_proxy as ffmpeg_generate_proxy
@@ -109,14 +111,7 @@ class IngestionActivities:
                 key=workflow_input.source.storage_key, destination_path=local_path
             )
         elif workflow_input.source.kind == "google_drive":
-            # Google Drive download is implemented in worker.google_drive and
-            # wired up once Member B's connection schema/OAuth endpoints land
-            # (spec Phase 4 / MVP1-063). Fail clearly rather than silently
-            # no-op so this is never mistaken for a working path.
-            raise _non_retryable(
-                "not_implemented",
-                "Google Drive source acquisition is not yet implemented (Phase 4).",
-            )
+            await self._download_from_drive(workflow_input, local_path)
         else:
             raise _non_retryable(
                 "invalid_source", f"Unknown source kind: {workflow_input.source.kind}"
@@ -125,6 +120,59 @@ class IngestionActivities:
         byte_size = os.path.getsize(local_path)
         logger.info("acquire_source_file.completed", asset_id=context.asset_id, byte_size=byte_size)
         return AcquireSourceFileResult(local_path=local_path, byte_size=byte_size)
+
+    async def _download_from_drive(
+        self, workflow_input: IngestAssetWorkflowInput, local_path: str
+    ) -> None:
+        """Fetch the source from Google Drive, refreshing credentials if needed."""
+        source = workflow_input.source
+        connections = self._deps.source_connection_repository
+        oauth = self._deps.google_drive_oauth
+
+        if connections is None or oauth is None:
+            raise _non_retryable(
+                "drive_not_configured",
+                "Google Drive ingestion requires a connection repository and OAuth client.",
+            )
+        if not source.source_connection_id or not source.source_external_id:
+            raise _non_retryable(
+                "invalid_source",
+                "google_drive source is missing a connection id or Drive file id.",
+            )
+
+        organization_id = workflow_input.context.organization_id
+        stored = await connections.get_encrypted_credentials(
+            organization_id=organization_id, connection_id=source.source_connection_id
+        )
+
+        try:
+            credentials = DriveCredentials.from_storage(stored)
+            refreshed = await oauth.ensure_access_token(credentials)
+        except TokenRefreshRequired as exc:
+            # Authentication expiry pauses the connection rather than retrying
+            # (spec 11.5); the user must reconnect it.
+            await connections.update_status(
+                organization_id=organization_id,
+                connection_id=source.source_connection_id,
+                status="error",
+                error_message=str(exc),
+            )
+            raise _non_retryable("drive_reauthorization_required", str(exc)) from exc
+
+        if refreshed != credentials:
+            await connections.update_encrypted_credentials(
+                organization_id=organization_id,
+                connection_id=source.source_connection_id,
+                encrypted_credentials=refreshed.to_storage(),
+            )
+
+        client = DriveClient(access_token=refreshed.access_token or "")
+        try:
+            await client.download_to_path(
+                file_id=source.source_external_id, destination_path=local_path
+            )
+        finally:
+            await client.aclose()
 
     # -- 3. calculate_checksum ------------------------------------------------
 

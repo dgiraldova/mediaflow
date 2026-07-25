@@ -58,13 +58,16 @@ async def clients(api_app):
     """
     transport = httpx.ASGITransport(app=api_app)
     async with api_app.router.lifespan_context(api_app):
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://api",
-            headers={"X-Internal-Token": INTERNAL_TOKEN},
-        ) as worker_client, httpx.AsyncClient(
-            transport=transport, base_url="http://api", headers=USER_HEADERS
-        ) as user_client:
+        async with (
+            httpx.AsyncClient(
+                transport=transport,
+                base_url="http://api",
+                headers={"X-Internal-Token": INTERNAL_TOKEN},
+            ) as worker_client,
+            httpx.AsyncClient(
+                transport=transport, base_url="http://api", headers=USER_HEADERS
+            ) as user_client,
+        ):
             yield worker_client, user_client
 
 
@@ -217,13 +220,15 @@ async def test_storage_keys_pass_member_b_validation(clients, repos):
 
     from worker.storage.keys import StorageKeyKind, build_storage_key
 
-    proxy_key = build_storage_key(
-        StorageKeyKind.PROXY, organization_id=ORG, asset_id=asset_id
-    )
+    proxy_key = build_storage_key(StorageKeyKind.PROXY, organization_id=ORG, asset_id=asset_id)
     response = await repos["api"].patch_processing(
         asset_id,
-        {"stage": "generating_preview", "status": "processing", "progress": 35,
-         "proxy_key": proxy_key},
+        {
+            "stage": "generating_preview",
+            "status": "processing",
+            "progress": 35,
+            "proxy_key": proxy_key,
+        },
     )
     assert response["stage"] == "generating_preview"
 

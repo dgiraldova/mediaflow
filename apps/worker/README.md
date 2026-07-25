@@ -122,8 +122,11 @@ apps/worker/.venv/Scripts/python scripts/dev/demo_pipeline.py
 | `IngestAssetWorkflow` + activities + compensation | Done |
 | Integration with Member B's API (verified by tests) | Done |
 | Media-delivery server for playback | Done |
-| Google Drive connector | Not started (Phase 4) |
-| Clip-export workflow | Not started (Phase 5) |
+| `ExportClipWorkflow` + accurate-cut rendering | Done |
+| Google Drive OAuth, discovery, sync, download | Done |
+| Drive sync wired to real connection rows | Blocked on `source_connections` table |
+| Clip exports wired to real export rows | Blocked on `clip_exports` table |
+| Verified against real Temporal + MinIO + FFmpeg | Not yet — needs a machine with Docker |
 
 ### Known gaps in the current API schema
 

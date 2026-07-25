@@ -136,13 +136,36 @@ Ordered by how much they cost us:
    `POST /uploads/{id}/complete` you should signal the worker. Simplest for
    MVP: a `POST /api/v1/internal/workflows/ingest` endpoint I poll, or you call
    the Temporal client directly. I'd rather you decide than guess.
-3. **Clip exports.** There is no `clip_exports` table or export endpoint yet.
-   My FFmpeg accurate-cut extraction is done and tested. I need
-   `POST /api/v1/collections/.../export` (or similar) plus an internal
-   status-update endpoint before I can wire the export workflow end to end.
-4. **Google Drive connections.** No `source_connections` table yet. I need to
-   store encrypted OAuth refresh tokens and a `sync_cursor` per connection
-   before the Drive connector can do anything real.
+3. **Clip exports.** `ExportClipWorkflow` is **built and tested** — it
+   validates the range, renders an accurate cut from the proxy, uploads to
+   `orgs/{org}/clips/{export_id}/clip.mp4` and reports status. What is missing
+   on your side:
+   - a `clip_exports` table (`id`, `organization_id`, `asset_id`,
+     `source_moment_id`, `start_ms`, `end_ms`, `status`, `output_storage_key`,
+     `output_mime_type`, `error_message`, `requested_by`)
+   - a user-facing request endpoint (`POST /api/v1/clip-exports`) and a status
+     read endpoint
+   - internal endpoints for me to mark an export `ready` or `failed`
+
+   Until those exist the workflow still renders and uploads correctly; only
+   the status write degrades to a log line.
+
+4. **Google Drive connections.** The connector is **built and tested** —
+   OAuth with refresh, folder discovery, incremental listing, streaming
+   download, and duplicate detection. What is missing on your side is a
+   `source_connections` table (spec §9.2) with at least:
+   - `encrypted_credentials JSONB` — I hand you
+     `{refresh_token, access_token, expires_at_epoch}`; **the refresh token is
+     a long-lived credential and must be encrypted at rest and never returned
+     through any public endpoint**
+   - `sync_cursor TEXT` — I return an RFC 3339 timestamp; passing it back on
+     the next sync is what makes it incremental
+   - `status` + an error message, so a revoked grant surfaces in the UI as
+     "reconnect" rather than silently failing forever
+
+   Assets from Drive also need `source_connection_id` and
+   `source_external_id`, with a unique index on the pair — that plus the
+   checksum column is what prevents re-importing the same Drive file.
 
 ### One security note
 
@@ -165,12 +188,40 @@ second pair of eyes before pilot (spec §6.6).
 
 ---
 
+## Member A — Google Drive UI (Phase 4)
+
+The connector is ready; the flow you build against is:
+
+1. Your settings page asks the API for an authorization URL. The API calls
+   `GoogleDriveOAuth.authorization_url(state=...)` — **`state` must be an
+   unguessable, single-use value the callback verifies**, otherwise the
+   callback is open to CSRF.
+2. The user consents on Google and lands on the callback endpoint, which
+   exchanges the code and stores the connection.
+3. Your folder picker calls a listing endpoint backed by
+   `DriveClient.list_folders(parent_id=...)` — it returns `{id, name}` pairs
+   and supports drilling down from `"root"`.
+4. The user picks folders; sync runs on demand or every 15 minutes.
+
+Sync outcomes you should surface per file: `new_file`, `source_modified`
+(ingested) and `already_imported`, `duplicate_content`, `unsupported_format`,
+`empty_file` (skipped). A connection whose grant was revoked comes back with
+status `error` — that needs a "Reconnect" affordance, not a retry button.
+
+Note the scope is **read-only**: we never modify or delete a customer's Drive
+files. Worth saying so in the consent screen copy.
+
+---
+
 ## What I am doing next
 
-1. Clip-export workflow (Phase 5) — FFmpeg extraction is done, wiring the
-   Temporal workflow around it.
-2. Google Drive connector (Phase 4) — OAuth, folder discovery, incremental
-   sync, credential refresh.
+Nothing in my lane is blocked on me any more — Phases 1 through 5 are built
+and tested. What remains is integration work that needs your side first:
 
-Both will land against interfaces, so they are ready the moment Member B's
-tables exist.
+1. Wiring the export workflow to real `clip_exports` rows (needs Member B).
+2. Wiring Drive sync to real `source_connections` rows (needs Member B).
+3. End-to-end run against real Temporal + MinIO + FFmpeg in Docker, which I
+   cannot execute in this sandbox (no loopback sockets, no FFmpeg binary).
+   **Someone should run `docker compose -f
+   infrastructure/docker/media/docker-compose.media.yml up --build` on a real
+   machine and report back** — that is the one unverified layer.
