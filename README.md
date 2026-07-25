@@ -1,0 +1,49 @@
+# Mediaflow demo backend
+
+This is the fastest local backend slice for the demo: an organization-scoped API
+that creates a video asset, accepts Team C's processing updates, and returns its
+current status. It deliberately uses SQLite and the `X-User-Id` demo header;
+replace them with Supabase Auth/Postgres/RLS after the demo.
+
+## Run
+
+```sh
+cp .env.example .env
+/opt/homebrew/bin/python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/uvicorn app.main:app --reload
+```
+
+OpenAPI is available at `http://127.0.0.1:8000/docs`. The seeded credentials are
+`X-User-Id: demo-user` and organization ID `demo-org`.
+
+## Team C contract
+
+1. Create an asset before beginning work:
+
+```sh
+curl -X POST http://127.0.0.1:8000/api/v1/uploads/initiate \
+  -H 'Content-Type: application/json' -H 'X-User-Id: demo-user' \
+  -d '{"organization_id":"demo-org","original_filename":"sample.mp4","media_type":"video"}'
+```
+
+2. Report FFprobe/proxy progress using the returned `asset_id`:
+
+```sh
+curl -X PATCH http://127.0.0.1:8000/api/v1/internal/assets/ASSET_ID/processing \
+  -H 'Content-Type: application/json' -H 'X-Internal-Token: change-me-before-sharing' \
+  -d '{"stage":"ffprobe","status":"processing","progress":50,"duration_ms":42000,"width":1920,"height":1080}'
+```
+
+Allowed worker statuses are `queued`, `processing`, `completed`, and `failed`.
+Set `error_message` when reporting `failed`. The status read endpoint is:
+
+```sh
+curl http://127.0.0.1:8000/api/v1/assets/ASSET_ID -H 'X-User-Id: demo-user'
+```
+
+## Verification
+
+```sh
+.venv/bin/python -m pytest
+```
