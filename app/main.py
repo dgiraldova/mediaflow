@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
 import uuid
@@ -10,6 +14,7 @@ from typing import Generator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +28,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./mediaflow-demo.db"
     internal_worker_token: str = "change-me-before-sharing"
+    jwt_secret: str = "replace-with-a-long-random-local-secret"
 
 
 class Base(DeclarativeBase):
@@ -41,6 +47,16 @@ class Organization(Base):
     slug: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class OrganizationMember(Base):
@@ -81,6 +97,29 @@ class ProcessingJob(Base):
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TranscriptSegment(Base):
+    __tablename__ = "transcript_segments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    speaker: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    text: Mapped[str] = mapped_column(String(2000), nullable=False)
+
+
+class MediaMoment(Base):
+    __tablename__ = "media_moments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class Role(StrEnum):
@@ -158,16 +197,55 @@ class ProcessingUpdate(BaseModel):
     error_message: str | None = Field(default=None, max_length=500)
 
 
+class LoginInput(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=1, max_length=255)
+
+
+class RegisterInput(LoginInput):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class SessionOut(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int = 900
+
+
+class TranscriptOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    start_ms: int
+    end_ms: int
+    speaker: str | None
+    text: str
+
+
+class MomentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    title: str
+    start_ms: int
+    end_ms: int
+    category: str
+    score: int
+
+
 def make_engine(database_url: str) -> Engine:
     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
     return create_engine(database_url, connect_args=connect_args)
 
 
-def create_app(database_url: str | None = None, internal_worker_token: str | None = None) -> FastAPI:
+def create_app(
+    database_url: str | None = None,
+    internal_worker_token: str | None = None,
+    jwt_secret: str | None = None,
+) -> FastAPI:
     settings = Settings()
     engine = make_engine(database_url or settings.database_url)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     token = internal_worker_token or settings.internal_worker_token
+    signing_secret = jwt_secret or settings.jwt_secret
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -178,6 +256,13 @@ def create_app(database_url: str | None = None, internal_worker_token: str | Non
 
     app = FastAPI(title="Mediaflow Demo API", version="0.1.0", lifespan=lifespan)
     app.state.session_factory = session_factory
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.middleware("http")
     async def request_id(request: Request, call_next):
@@ -201,10 +286,19 @@ def create_app(database_url: str | None = None, internal_worker_token: str | Non
         finally:
             db.close()
 
-    def current_user(x_user_id: str | None = Header(default=None)) -> str:
-        if not x_user_id:
-            raise HTTPException(status_code=401, detail="X-User-Id header is required")
-        return x_user_id
+    def current_user(
+        authorization: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+    ) -> str:
+        if authorization:
+            scheme, _, value = authorization.partition(" ")
+            if scheme.lower() != "bearer" or not value:
+                raise HTTPException(status_code=401, detail="Malformed bearer token")
+            return decode_access_token(value, signing_secret)
+        # Maintained only for Team C's existing local worker/demo contract.
+        if x_user_id:
+            return x_user_id
+        raise HTTPException(status_code=401, detail="Bearer token is required")
 
     def require_internal_token(x_internal_token: str | None = Header(default=None)) -> None:
         if not x_internal_token or x_internal_token != token:
@@ -219,6 +313,30 @@ def create_app(database_url: str | None = None, internal_worker_token: str | Non
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/api/v1/auth/register", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
+    def register(payload: RegisterInput, db: Session = Depends(get_db)) -> SessionOut:
+        if db.scalar(select(User).where(User.email == payload.email.lower())):
+            raise HTTPException(status_code=409, detail="An account already exists for this email")
+        user = User(email=payload.email.lower(), name=payload.name, password_hash=password_hash(payload.password))
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return SessionOut(access_token=encode_access_token(user.id, signing_secret))
+
+    @app.post("/api/v1/auth/login", response_model=SessionOut)
+    def login(payload: LoginInput, db: Session = Depends(get_db)) -> SessionOut:
+        user = db.scalar(select(User).where(User.email == payload.email.lower()))
+        if not user or not password_matches(payload.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        return SessionOut(access_token=encode_access_token(user.id, signing_secret))
+
+    @app.get("/api/v1/auth/me")
+    def me(user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> dict[str, str]:
+        user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=401, detail="Token subject no longer exists")
+        return {"id": user.id, "email": user.email, "name": user.name}
 
     @app.post("/api/v1/organizations", response_model=OrganizationOut, status_code=status.HTTP_201_CREATED)
     def create_organization(payload: OrganizationCreate, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> Organization:
@@ -263,6 +381,18 @@ def create_app(database_url: str | None = None, internal_worker_token: str | Non
         require_membership(asset.organization_id, user_id, db)
         return asset
 
+    @app.get("/api/v1/assets/{asset_id}/transcript", response_model=list[TranscriptOut])
+    def get_transcript(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[TranscriptSegment]:
+        asset = get_asset_or_404(asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        return list(db.scalars(select(TranscriptSegment).where(TranscriptSegment.asset_id == asset_id).order_by(TranscriptSegment.start_ms)))
+
+    @app.get("/api/v1/assets/{asset_id}/moments", response_model=list[MomentOut])
+    def get_moments(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[MediaMoment]:
+        asset = get_asset_or_404(asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        return list(db.scalars(select(MediaMoment).where(MediaMoment.asset_id == asset_id).order_by(MediaMoment.start_ms)))
+
     @app.get("/api/v1/assets/{asset_id}/processing-job", response_model=ProcessingJobOut)
     def get_processing_job(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> ProcessingJob:
         asset = get_asset_or_404(asset_id, db)
@@ -296,7 +426,28 @@ def seed_demo_data(db: Session) -> None:
     if db.get(Organization, "demo-org"):
         return
     db.add(Organization(id="demo-org", name="Mediaflow Demo", slug="mediaflow-demo"))
+    db.add(User(id="demo-user", email="alex@northstar.studio", name="Alex Morgan", password_hash=password_hash("mediaflow-demo")))
     db.add(OrganizationMember(organization_id="demo-org", user_id="demo-user", role=Role.OWNER))
+    asset = Asset(
+        id="customer-story",
+        organization_id="demo-org",
+        original_filename="acme_interview_final_v3.mp4",
+        media_type="video",
+        upload_key="demo/customer-story.mp4",
+        status="ready",
+        duration_ms=1_122_000,
+    )
+    db.add(asset)
+    db.add(ProcessingJob(asset_id=asset.id, stage="complete", status="completed", progress=100))
+    db.add_all([
+        TranscriptSegment(asset_id=asset.id, start_ms=0, end_ms=14_000, speaker="Interviewer", text="Tell me what implementation looked like before you started."),
+        TranscriptSegment(asset_id=asset.id, start_ms=31_000, end_ms=48_000, speaker="Maya", text="The surprise was how easy onboarding felt. We connected our library on a Tuesday."),
+        TranscriptSegment(asset_id=asset.id, start_ms=48_000, end_ms=67_000, speaker="Maya", text="By Thursday, the team was finding customer moments we had completely forgotten."),
+    ])
+    db.add_all([
+        MediaMoment(id="moment-1", asset_id=asset.id, title="Onboarding was easier than expected", start_ms=31_000, end_ms=53_000, category="Testimonial", score=96),
+        MediaMoment(id="moment-2", asset_id=asset.id, title="From forgotten footage to useful stories", start_ms=48_000, end_ms=64_000, category="Outcome", score=92),
+    ])
     db.commit()
 
 
@@ -312,7 +463,46 @@ def error_code(status_code: int) -> str:
 
 
 def error_response(request: Request, status_code: int, detail: str, code: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"detail": detail, "code": code, "request_id": request.state.request_id})
+    return JSONResponse(status_code=status_code, content={"code": code, "message": detail, "details": {"request_id": request.state.request_id}})
+
+
+def password_hash(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"{salt.hex()}${digest.hex()}"
+
+
+def password_matches(password: str, encoded: str) -> bool:
+    salt_hex, digest_hex = encoded.split("$", 1)
+    candidate = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
+    return hmac.compare_digest(candidate.hex(), digest_hex)
+
+
+def b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def encode_access_token(user_id: str, secret: str) -> str:
+    header = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    payload = b64url(json.dumps({"sub": user_id, "iat": int(utcnow().timestamp()), "exp": int(utcnow().timestamp()) + 900}, separators=(",", ":")).encode())
+    signature = b64url(hmac.new(secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
+    return f"{header}.{payload}.{signature}"
+
+
+def decode_access_token(token: str, secret: str) -> str:
+    try:
+        header, payload, signature = token.split(".")
+        expected = b64url(hmac.new(secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest())
+        claims = json.loads(b64url_decode(payload))
+        if not hmac.compare_digest(signature, expected) or claims["exp"] <= int(utcnow().timestamp()):
+            raise ValueError
+        return str(claims["sub"])
+    except (KeyError, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=401, detail="Invalid or expired bearer token") from None
 
 
 app = create_app()
@@ -320,4 +510,4 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="127.0.0.1", port=int(os.getenv("PORT", "8000")), reload=True)
+    uvicorn.run("app.main:app", host="127.0.0.1", port=int(os.getenv("PORT", "3000")), reload=True)

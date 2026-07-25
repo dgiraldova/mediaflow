@@ -11,11 +11,21 @@ replace them with Supabase Auth/Postgres/RLS after the demo.
 cp .env.example .env
 /opt/homebrew/bin/python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/uvicorn app.main:app --reload
+.venv/bin/uvicorn app.main:app --reload --port 3000
 ```
 
-OpenAPI is available at `http://127.0.0.1:8000/docs`. The seeded credentials are
-`X-User-Id: demo-user` and organization ID `demo-org`.
+OpenAPI is available at `http://127.0.0.1:3000/docs`. The web client should use
+`http://localhost:3000/api/v1`; CORS is enabled for Vite on port 5173.
+
+For the Team A frontend, set `VITE_DEMO_MODE=false` and sign in with:
+
+```
+alex@northstar.studio
+mediaflow-demo
+```
+
+`POST /api/v1/auth/login` returns a 15-minute Bearer token. The existing
+`X-User-Id: demo-user` header remains available for Team C's local worker demo.
 
 ## Team C contract
 
