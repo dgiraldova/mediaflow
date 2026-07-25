@@ -96,9 +96,26 @@ identical payload is idempotent; the persisted transcript and moments become
 available through the public asset and search endpoints immediately.
 
 After the browser has uploaded directly to storage, it calls
-`POST /api/v1/uploads/{upload_id}/complete` with an optional `byte_size`.
-This moves the asset from `uploading` to `processing`; Team C then reports
-`completed` or `failed` through the internal worker endpoint. The public asset
+`POST /api/v1/uploads/{upload_id}/complete` with optional `byte_size` and
+`checksum_sha256` (a 64-character SHA-256 digest). This moves the asset from
+`uploading` to `processing`. A checksum already present in the same
+organization returns `409` with code `duplicate_asset`.
+
+Team C can now claim completed uploads with the internal token:
+
+```json
+POST /api/v1/internal/workflows/ingest
+{ "worker_id": "media-worker-1", "limit": 1 }
+```
+
+The response returns `jobs` containing the asset, processing job, organization,
+and original upload metadata. Claiming moves each job to
+`preparing_file`/`processing` at 15%; a repeat claim will not receive it again.
+`/api/v1/internal/workflows/ingest/claim` is also available as an alias.
+
+When known, include `checksum_sha256` and `provider_asset_id` in the existing
+worker processing `PATCH`; both are persisted on the public asset record. Team
+C then reports `completed` or `failed` through that endpoint. The public asset
 status is `ready` when processing completes. A user can cancel before
 completion through `POST /api/v1/uploads/{upload_id}/abort`.
 
