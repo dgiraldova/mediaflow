@@ -18,6 +18,10 @@ Demo mode remains available for frontend-only work.
 - Live processing polling:
   `GET /api/v1/assets/{asset_id}/processing-job` every 2.5 seconds for queued,
   uploading, or processing assets
+- Upload-time media preview and editable naming. The edited value is persisted
+  through `original_filename`.
+- Session-local gallery thumbnails and Asset Detail playback for files selected
+  in the current browser session.
 - Live Search:
   `POST /api/v1/search`
 - Live Asset Detail:
@@ -89,9 +93,16 @@ Processing polling consumes `asset_id`, `stage`, `status`, `progress`, and
    initiate response returns `upload_key` but no signed upload URL, so Team A
    registers the file metadata and completes the provided API lifecycle; it
    does not upload file bytes to object storage yet.
-7. Replace the hard-coded `demo-org` with an organization selected from the
+7. Return a signed upload target from initiation, then expose a thumbnail URL
+   and playback URL after Team C creates derivatives. Session-local blob URLs
+   already prove the frontend thumbnail/player UI, but they intentionally do
+   not survive a page refresh.
+8. Add an asset rename endpoint or a dedicated `display_name` field if users
+   should rename existing assets after upload. Team A currently supports
+   editing the name before upload without changing backend-owned routes.
+9. Replace the hard-coded `demo-org` with an organization selected from the
    authenticated user's memberships before production use.
-8. Investigate the backend pytest/TestClient hang. The isolated live-server
+10. Investigate the backend pytest/TestClient hang. The isolated live-server
    contract passes, but `.venv/bin/python -m pytest -q` currently stalls.
 
 ## Validation completed by Team A

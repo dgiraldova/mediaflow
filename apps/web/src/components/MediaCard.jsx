@@ -4,7 +4,9 @@ import { StatusPill } from "./StatusPill";
 
 export const MediaArtwork = ({ asset, className = "" }) => (
   <div
-    className={`media-artwork artwork-${asset.visual ?? "portrait"} ${className}`}
+    className={`media-artwork artwork-${asset.visual ?? "portrait"} ${
+      asset.previewUrl ? "has-media-preview" : ""
+    } ${className}`}
     style={{
       "--art-color-a": asset.colors?.[0] ?? "#d9d2c4",
       "--art-color-b": asset.colors?.[1] ?? "#364a48",
@@ -12,10 +14,31 @@ export const MediaArtwork = ({ asset, className = "" }) => (
     aria-label={`${asset.name} preview`}
     role="img"
   >
-    <div className="art-grid" />
-    <div className="art-subject">
-      <span />
-    </div>
+    {asset.previewUrl && asset.mediaType === "image" ? (
+      <img className="media-preview-image" src={asset.previewUrl} alt="" />
+    ) : asset.previewUrl && asset.mediaType === "video" ? (
+      <video
+        className="media-preview-video"
+        src={asset.previewUrl}
+        muted
+        playsInline
+        preload="metadata"
+        aria-hidden="true"
+        onLoadedData={(event) => {
+          const video = event.currentTarget;
+          if (Number.isFinite(video.duration) && video.duration > 0) {
+            video.currentTime = Math.min(0.1, video.duration / 2);
+          }
+        }}
+      />
+    ) : (
+      <>
+        <div className="art-grid" />
+        <div className="art-subject">
+          <span />
+        </div>
+      </>
+    )}
     {asset.mediaType === "video" && (
       <span className="art-play" aria-hidden="true">
         <Play size={16} fill="currentColor" />

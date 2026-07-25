@@ -153,7 +153,30 @@ describe("MediaFlow frontend", () => {
     const user = userEvent.setup();
     vi.stubEnv("VITE_DEMO_MODE", "false");
     window.localStorage.setItem("mediaflow.access_token", "signed.jwt");
-    vi.spyOn(api.assets, "list").mockResolvedValue([]);
+    vi.spyOn(api.assets, "list")
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        {
+          id: "asset-uploaded",
+          organization_id: "demo-org",
+          original_filename: "customer-kickoff.mp4",
+          media_type: "video",
+          status: "processing",
+          byte_size: 5,
+          duration_ms: null,
+          width: null,
+          height: null,
+          error_message: null,
+        },
+      ]);
+    vi.spyOn(api.assets, "processingJob").mockResolvedValue({
+      id: "job-uploaded",
+      asset_id: "asset-uploaded",
+      stage: "queued",
+      status: "queued",
+      progress: 0,
+      error_message: null,
+    });
     vi.spyOn(api.uploads, "initiate").mockResolvedValue({
       asset_id: "asset-uploaded",
       upload_id: "upload-live",
@@ -172,12 +195,16 @@ describe("MediaFlow frontend", () => {
     await user.click(screen.getByRole("button", { name: /add media/i }));
     const file = new File(["media"], "new-story.mp4", { type: "video/mp4" });
     await user.upload(screen.getByLabelText(/drop video, images, or audio/i), file);
+    expect(screen.getByLabelText("Preview of new-story.mp4")).toBeInTheDocument();
+    const nameInput = screen.getByRole("textbox", { name: /name in mediaflow/i });
+    await user.clear(nameInput);
+    await user.type(nameInput, "customer-kickoff.mp4");
     await user.click(screen.getByRole("button", { name: "Start upload" }));
 
     expect(await screen.findByText("Upload registered — analysis queued")).toBeInTheDocument();
     expect(api.uploads.initiate).toHaveBeenCalledWith({
       organization_id: "demo-org",
-      original_filename: "new-story.mp4",
+      original_filename: "customer-kickoff.mp4",
       media_type: "video",
     });
     expect(api.uploads.complete).toHaveBeenCalledWith("upload-live", {
@@ -186,5 +213,9 @@ describe("MediaFlow frontend", () => {
     await waitFor(() => {
       expect(api.assets.list).toHaveBeenCalledTimes(2);
     });
+    expect(await screen.findByText("Customer Kickoff")).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Customer Kickoff preview" }),
+    ).toHaveClass("has-media-preview");
   });
 });

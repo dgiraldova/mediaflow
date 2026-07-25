@@ -1,12 +1,7 @@
 import { CheckCircle2, FileVideo, UploadCloud, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-
-const mediaTypeForFile = (file) => {
-  if (file.type.startsWith("image/")) return "image";
-  if (file.type.startsWith("audio/")) return "audio";
-  return "video";
-};
+import { createLocalPreviewUrl, mediaTypeForFile } from "../lib/local-media";
 
 export const UploadDialog = ({
   open,
@@ -21,6 +16,8 @@ export const UploadDialog = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [uploadSession, setUploadSession] = useState(null);
+  const [displayName, setDisplayName] = useState("");
+  const [previewUrl, setPreviewUrl] = useState(null);
   const timerRef = useRef(null);
 
   useEffect(
@@ -29,6 +26,21 @@ export const UploadDialog = ({
     },
     [],
   );
+
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null);
+      return undefined;
+    }
+
+    const nextPreviewUrl = createLocalPreviewUrl(file);
+    setPreviewUrl(nextPreviewUrl);
+    return () => {
+      if (nextPreviewUrl && typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(nextPreviewUrl);
+      }
+    };
+  }, [file]);
 
   if (!open) return null;
 
@@ -40,7 +52,15 @@ export const UploadDialog = ({
     setBusy(false);
     setError("");
     setUploadSession(null);
+    setDisplayName(selectedFile.name);
   };
+
+  const normalizedDisplayName = displayName.trim();
+  const fileNameError = !normalizedDisplayName
+    ? "Enter a name for this media."
+    : /[/\\]/.test(normalizedDisplayName)
+      ? "The media name cannot contain slashes."
+      : "";
 
   const beginDemoUpload = () => {
     setBusy(true);
@@ -61,6 +81,10 @@ export const UploadDialog = ({
   const beginUpload = async () => {
     if (!file || busy || timerRef.current) return;
     setError("");
+    if (fileNameError) {
+      setError(fileNameError);
+      return;
+    }
 
     if (!liveApi) {
       beginDemoUpload();
@@ -75,7 +99,7 @@ export const UploadDialog = ({
       if (!session) {
         session = await api.uploads.initiate({
           organization_id: organizationId,
-          original_filename: file.name,
+          original_filename: normalizedDisplayName,
           media_type: mediaTypeForFile(file),
         });
         setUploadSession(session);
@@ -87,7 +111,7 @@ export const UploadDialog = ({
       });
       setProgress(100);
       setComplete(true);
-      onUploaded?.({ ...completedUpload, file });
+      onUploaded?.({ ...completedUpload, file, displayName: normalizedDisplayName });
     } catch (uploadError) {
       setError(uploadError.message);
     } finally {
@@ -108,6 +132,7 @@ export const UploadDialog = ({
     setBusy(false);
     setError("");
     setUploadSession(null);
+    setDisplayName("");
     onClose();
   };
 
@@ -149,27 +174,65 @@ export const UploadDialog = ({
             />
           </label>
         ) : (
-          <div className="upload-file">
-            <span className={`upload-file-icon ${complete ? "done" : ""}`}>
-              {complete ? <CheckCircle2 size={24} /> : <FileVideo size={24} />}
-            </span>
-            <div className="upload-file-copy">
-              <strong>{file.name}</strong>
-              <span>
-                {complete
-                  ? liveApi
-                    ? "Upload registered — analysis queued"
-                    : "Upload complete — ready for analysis"
-                  : busy
-                    ? "Registering with MediaFlow..."
-                    : "Ready to upload"}
-              </span>
-              <div className="progress-track" aria-label={`Upload ${progress}% complete`}>
-                <span style={{ width: `${progress}%` }} />
-              </div>
+          <>
+            <div className="upload-preview">
+              {previewUrl && mediaTypeForFile(file) === "image" && (
+                <img src={previewUrl} alt={`Preview of ${normalizedDisplayName || file.name}`} />
+              )}
+              {previewUrl && mediaTypeForFile(file) === "video" && (
+                <video
+                  src={previewUrl}
+                  controls
+                  preload="metadata"
+                  aria-label={`Preview of ${normalizedDisplayName || file.name}`}
+                />
+              )}
+              {previewUrl && mediaTypeForFile(file) === "audio" && (
+                <div className="upload-audio-preview">
+                  <FileVideo size={28} aria-hidden="true" />
+                  <audio
+                    src={previewUrl}
+                    controls
+                    aria-label={`Preview of ${normalizedDisplayName || file.name}`}
+                  />
+                </div>
+              )}
             </div>
-            <span className="progress-value">{progress}%</span>
-          </div>
+
+            <label className="upload-name-field">
+              Name in MediaFlow
+              <input
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                maxLength={255}
+                disabled={busy || complete || Boolean(uploadSession)}
+                aria-invalid={Boolean(fileNameError)}
+              />
+              <small>Edit this before uploading so the file is easy to recognize.</small>
+            </label>
+
+            <div className="upload-file">
+              <span className={`upload-file-icon ${complete ? "done" : ""}`}>
+                {complete ? <CheckCircle2 size={24} /> : <FileVideo size={24} />}
+              </span>
+              <div className="upload-file-copy">
+                <strong>{normalizedDisplayName || file.name}</strong>
+                <span>
+                  {complete
+                    ? liveApi
+                      ? "Upload registered — analysis queued"
+                      : "Upload complete — ready for analysis"
+                    : busy
+                      ? "Registering with MediaFlow..."
+                      : "Ready to upload"}
+                </span>
+                <div className="progress-track" aria-label={`Upload ${progress}% complete`}>
+                  <span style={{ width: `${progress}%` }} />
+                </div>
+              </div>
+              <span className="progress-value">{progress}%</span>
+            </div>
+          </>
         )}
 
         {error && (
@@ -191,7 +254,7 @@ export const UploadDialog = ({
           <button
             className="button primary"
             type="button"
-            disabled={!file || busy}
+            disabled={!file || busy || Boolean(fileNameError)}
             onClick={complete ? resetAndClose : beginUpload}
           >
             {complete ? "Done" : busy ? "Uploading..." : error ? "Try again" : "Start upload"}

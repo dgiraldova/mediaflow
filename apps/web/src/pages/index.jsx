@@ -45,6 +45,7 @@ import {
   toSearchResultViewModel,
   toTranscriptViewModel,
 } from "../lib/live-adapters";
+import { getLocalMedia, rememberLocalMedia } from "../lib/local-media";
 import { useAuth } from "../state/auth-context";
 
 export const LoginPage = () => {
@@ -254,7 +255,19 @@ export const LibraryPage = () => {
 
       try {
         const response = await api.assets.list({ organization_id: "demo-org" });
-        setLibraryAssets(response.map(toAssetViewModel));
+        setLibraryAssets(
+          response.map((assetResponse, index) => {
+            const mappedAsset = toAssetViewModel(assetResponse, index);
+            const localPreview = getLocalMedia(mappedAsset.id);
+            return localPreview
+              ? {
+                  ...mappedAsset,
+                  previewUrl: localPreview.url,
+                  mediaType: localPreview.mediaType,
+                }
+              : mappedAsset;
+          }),
+        );
       } catch (libraryError) {
         setError(libraryError.message);
       } finally {
@@ -344,6 +357,14 @@ export const LibraryPage = () => {
   const processingCount = libraryAssets.filter((asset) =>
     ["pending", "processing", "uploading"].includes(asset.status),
   ).length;
+
+  const handleUploaded = useCallback(
+    ({ asset_id: assetId, file }) => {
+      rememberLocalMedia(assetId, file);
+      void loadAssets({ showLoading: false });
+    },
+    [loadAssets],
+  );
 
   return (
     <>
@@ -487,7 +508,7 @@ export const LibraryPage = () => {
       <UploadDialog
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
-        onUploaded={() => loadAssets({ showLoading: false })}
+        onUploaded={handleUploaded}
         liveApi={liveApi}
         organizationId="demo-org"
       />
@@ -734,8 +755,15 @@ export const AssetPage = () => {
       ]);
       const mappedMoments = momentsResponse.map(toMomentViewModel);
       const mappedAsset = toAssetViewModel(assetResponse);
+      const localPreview = getLocalMedia(mappedAsset.id);
       setAsset({
         ...mappedAsset,
+        ...(localPreview
+          ? {
+              previewUrl: localPreview.url,
+              mediaType: localPreview.mediaType,
+            }
+          : {}),
         moments: mappedMoments.length,
         description:
           mappedMoments.length > 0
@@ -760,6 +788,10 @@ export const AssetPage = () => {
 
   const seek = (startMs) => {
     setActiveStart(startMs);
+    const localPlayer = playerRef.current?.querySelector("video, audio");
+    if (asset?.previewUrl && localPlayer) {
+      localPlayer.currentTime = startMs / 1_000;
+    }
     playerRef.current?.focus();
   };
 
@@ -827,27 +859,57 @@ export const AssetPage = () => {
       <div className="asset-layout">
         <section className="player-column">
           <div className="video-player" tabIndex="-1" ref={playerRef}>
-            <MediaArtwork asset={asset} className="player-artwork" />
-            <button className="player-main-button" type="button" aria-label="Play video">
-              <Play size={23} fill="currentColor" />
-            </button>
-            <div className="player-controls">
-              <button type="button" aria-label="Play">
-                <Play size={15} fill="currentColor" />
-              </button>
-              <span>{formatTimestamp(activeStart)}</span>
-              <div className="player-track">
-                <span
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      Math.max(4, (activeStart / (asset.durationMs || 18.7 * 60_000)) * 100),
-                    )}%`,
-                  }}
-                />
-              </div>
-              <span>{asset.duration}</span>
-            </div>
+            {asset.previewUrl ? (
+              <>
+                {asset.mediaType === "video" && (
+                  <video
+                    className="local-player-media"
+                    src={asset.previewUrl}
+                    controls
+                    preload="metadata"
+                    aria-label={`Preview of ${asset.name}`}
+                  />
+                )}
+                {asset.mediaType === "image" && (
+                  <img
+                    className="local-player-media"
+                    src={asset.previewUrl}
+                    alt={`Preview of ${asset.name}`}
+                  />
+                )}
+                {asset.mediaType === "audio" && (
+                  <div className="local-audio-player">
+                    <FileVideo size={42} aria-hidden="true" />
+                    <audio src={asset.previewUrl} controls aria-label={`Preview of ${asset.name}`} />
+                  </div>
+                )}
+                <span className="local-preview-note">Local preview · available this session</span>
+              </>
+            ) : (
+              <>
+                <MediaArtwork asset={asset} className="player-artwork" />
+                <button className="player-main-button" type="button" aria-label="Play video">
+                  <Play size={23} fill="currentColor" />
+                </button>
+                <div className="player-controls">
+                  <button type="button" aria-label="Play">
+                    <Play size={15} fill="currentColor" />
+                  </button>
+                  <span>{formatTimestamp(activeStart)}</span>
+                  <div className="player-track">
+                    <span
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.max(4, (activeStart / (asset.durationMs || 18.7 * 60_000)) * 100),
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <span>{asset.duration}</span>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="asset-summary">
