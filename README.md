@@ -47,7 +47,7 @@ The response contains `search_id` and timestamped `results`, each with
 1. Create an asset before beginning work:
 
 ```sh
-curl -X POST http://127.0.0.1:8000/api/v1/uploads/initiate \
+curl -X POST http://127.0.0.1:3000/api/v1/uploads/initiate \
   -H 'Content-Type: application/json' -H 'X-User-Id: demo-user' \
   -d '{"organization_id":"demo-org","original_filename":"sample.mp4","media_type":"video"}'
 ```
@@ -55,7 +55,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/uploads/initiate \
 2. Report FFprobe/proxy progress using the returned `asset_id`:
 
 ```sh
-curl -X PATCH http://127.0.0.1:8000/api/v1/internal/assets/ASSET_ID/processing \
+curl -X PATCH http://127.0.0.1:3000/api/v1/internal/assets/ASSET_ID/processing \
   -H 'Content-Type: application/json' -H 'X-Internal-Token: change-me-before-sharing' \
   -d '{"stage":"ffprobe","status":"processing","progress":50,"duration_ms":42000,"width":1920,"height":1080}'
 ```
@@ -64,8 +64,15 @@ Allowed worker statuses are `queued`, `processing`, `completed`, and `failed`.
 Set `error_message` when reporting `failed`. The status read endpoint is:
 
 ```sh
-curl http://127.0.0.1:8000/api/v1/assets/ASSET_ID -H 'X-User-Id: demo-user'
+curl http://127.0.0.1:3000/api/v1/assets/ASSET_ID -H 'X-User-Id: demo-user'
 ```
+
+After the browser has uploaded directly to storage, it calls
+`POST /api/v1/uploads/{upload_id}/complete` with an optional `byte_size`.
+This moves the asset from `uploading` to `processing`; Team C then reports
+`completed` or `failed` through the internal worker endpoint. The public asset
+status is `ready` when processing completes. A user can cancel before
+completion through `POST /api/v1/uploads/{upload_id}/abort`.
 
 ## Verification
 
