@@ -44,3 +44,54 @@ def test_requires_demo_user_header(tmp_path):
         response = api.get("/api/v1/organizations")
         assert response.status_code == 401
         assert response.json()["code"] == "authentication_error"
+
+
+def test_frontend_login_and_asset_detail_contract(tmp_path):
+    with client(tmp_path) as api:
+        session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
+        assert session.status_code == 200
+        assert session.json()["token_type"] == "Bearer"
+        headers = {"Authorization": f"Bearer {session.json()['access_token']}"}
+
+        profile = api.get("/api/v1/auth/me", headers=headers)
+        assert profile.json()["email"] == "alex@northstar.studio"
+
+        asset = api.get("/api/v1/assets/customer-story", headers=headers)
+        assert asset.status_code == 200
+        transcript = api.get("/api/v1/assets/customer-story/transcript", headers=headers)
+        moments = api.get("/api/v1/assets/customer-story/moments", headers=headers)
+        assert transcript.status_code == 200
+        assert moments.status_code == 200
+        assert moments.json()[0]["start_ms"] == 31_000
+
+
+def test_frontend_error_envelope_and_cors(tmp_path):
+    with client(tmp_path) as api:
+        response = api.get("/api/v1/organizations", headers={"Origin": "http://localhost:5173"})
+        assert response.status_code == 401
+        assert response.json()["message"] == "Bearer token is required"
+        assert response.json()["details"]["request_id"]
+        assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_search_and_collections_are_scoped_to_authenticated_organization(tmp_path):
+    with client(tmp_path) as api:
+        session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
+        headers = {"Authorization": f"Bearer {session.json()['access_token']}"}
+
+        search = api.post("/api/v1/search", headers=headers, json={"query": "easy onboarding"})
+        assert search.status_code == 200
+        result = search.json()["results"][0]
+        assert result["asset_id"] == "customer-story"
+        assert result["match_reasons"]
+
+        created = api.post("/api/v1/collections", headers=headers, json={"name": "Customer voice", "description": "Useful proof points"})
+        assert created.status_code == 201
+        collection_id = created.json()["id"]
+        added = api.post(f"/api/v1/collections/{collection_id}/items", headers=headers, json={"moment_id": result["moment_id"]})
+        assert added.status_code == 201
+        assert added.json()["item_count"] == 1
+
+        items = api.get("/api/v1/collections", headers=headers)
+        assert items.status_code == 200
+        assert items.json()[0]["name"] == "Customer voice"
