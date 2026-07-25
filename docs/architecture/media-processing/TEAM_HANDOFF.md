@@ -26,7 +26,35 @@ python -m pytest -q                                      # Member B's 10 still p
 
 ---
 
-## Member A — frontend
+## Member A — the upload is not actually uploading
+
+`UploadDialog.jsx` calls `uploads.initiate` then `uploads.complete`, and only
+reads `file.size` in between. **The file bytes are never sent anywhere.** That
+is why real media processing cannot work yet: the worker looks in storage for
+an object nobody wrote.
+
+Add one step between initiate and complete:
+
+```js
+const session = await api.uploads.initiate({...});
+
+await fetch(`http://127.0.0.1:8001/uploads/${session.upload_key}`, {
+  method: "PUT",
+  headers: { "Content-Type": file.type || "video/mp4" },
+  body: file,
+});
+
+await api.uploads.complete(session.upload_id, { byte_size: file.size });
+```
+
+That endpoint is on my media server and relays into storage. For production
+the browser should instead PUT to a presigned URL that never touches an app
+server — I expose `POST /uploads/presign` (internal token) for Member B to
+call from `/uploads/initiate` and return alongside `upload_key`. Wiring that
+is a small change on both your sides; the relay works today without it.
+
+Use real upload progress from the `PUT` rather than the current simulated
+timer, so the bar reflects bytes actually transferred.
 
 ### You can build against these now
 

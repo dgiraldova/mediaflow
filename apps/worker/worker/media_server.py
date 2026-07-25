@@ -22,12 +22,39 @@ import re
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
 
 from worker.config import WorkerSettings, get_settings
 from worker.logging import configure_logging, get_logger
 from worker.storage.r2_client import R2Client
 
 logger = get_logger(__name__)
+
+
+class PresignRequest(BaseModel):
+    upload_key: str = Field(min_length=1, max_length=500)
+    content_type: str = Field(default="video/mp4", max_length=120)
+
+
+class PresignResponse(BaseModel):
+    url: str
+    method: str
+    headers: dict[str, str]
+    expires_in: int
+
+
+def _require_internal_token(request: Request, settings: WorkerSettings) -> None:
+    expected = settings.api.internal_token
+    if not expected:
+        raise HTTPException(status_code=503, detail="Internal token is not configured")
+    if request.headers.get("x-internal-token") != expected:
+        raise HTTPException(status_code=401, detail="Invalid internal worker token")
+
+
+def _reject_unsafe_key(key: str) -> None:
+    """Keys are attacker-influenced (they embed a user-supplied filename)."""
+    if key.startswith("/") or ".." in key.split("/"):
+        raise HTTPException(status_code=422, detail="Storage key must be a relative object key")
 
 # Only derivative objects are publicly streamable. Original uploads stay
 # private and are reachable exclusively through short-lived signed URLs.
@@ -79,6 +106,49 @@ def create_app(settings: WorkerSettings | None = None, storage: R2Client | None 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "bucket": settings.storage.bucket}
+
+    @app.post("/uploads/presign")
+    async def presign_upload(payload: PresignRequest, request: Request) -> PresignResponse:
+        """Issue a presigned PUT URL so the browser uploads straight to storage.
+
+        This is the production-shaped flow: the original media never passes
+        through an application server (spec 11.1). Member B's
+        ``/uploads/initiate`` should call this server-to-server with the
+        internal token and hand the URL to the browser.
+        """
+        _require_internal_token(request, settings)
+        _reject_unsafe_key(payload.upload_key)
+        url = storage.generate_presigned_put_url(
+            key=payload.upload_key, content_type=payload.content_type
+        )
+        return PresignResponse(
+            url=url,
+            method="PUT",
+            headers={"Content-Type": payload.content_type},
+            expires_in=settings.storage.presigned_upload_ttl_seconds,
+        )
+
+    @app.put("/uploads/{upload_key:path}")
+    async def upload_object(upload_key: str, request: Request) -> dict[str, object]:
+        """Accept an upload and relay it into storage.
+
+        A local-development convenience: it avoids configuring CORS on MinIO
+        and works when the bucket is not reachable from the browser. Bytes do
+        pass through this process, so production should use the presigned URL
+        from ``/uploads/presign`` instead.
+        """
+        _reject_unsafe_key(upload_key)
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="Empty upload")
+
+        await storage.put_object(
+            key=upload_key,
+            body=body,
+            content_type=request.headers.get("content-type") or content_type_for(upload_key),
+        )
+        logger.info("media_server.upload_stored", key=upload_key, byte_size=len(body))
+        return {"upload_key": upload_key, "byte_size": len(body)}
 
     @app.head("/{key:path}")
     async def head_object(key: str) -> Response:

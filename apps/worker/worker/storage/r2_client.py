@@ -166,6 +166,17 @@ class R2Client:
 
         return await asyncio.to_thread(_head)
 
+    async def put_object(self, *, key: str, body: bytes, content_type: str) -> R2Object:
+        """Write bytes directly. Used by the media server's relay upload path."""
+
+        def _put() -> None:
+            self._client.put_object(
+                Bucket=self._bucket, Key=key, Body=body, ContentType=content_type
+            )
+
+        await asyncio.to_thread(_put)
+        return R2Object(key=key, byte_size=len(body), etag="", content_type=content_type)
+
     async def read_object(
         self, *, key: str, byte_range: tuple[int, int] | None = None
     ) -> bytes:
