@@ -116,6 +116,7 @@ export const createApiClient = ({
       get: (assetId) => request(`/assets/${assetId}`),
       transcript: (assetId) => request(`/assets/${assetId}/transcript`),
       moments: (assetId) => request(`/assets/${assetId}/moments`),
+      processingJob: (assetId) => request(`/assets/${assetId}/processing-job`),
       playbackUrl: (assetId) => request(`/assets/${assetId}/playback-url`),
       retry: (assetId) => request(`/assets/${assetId}/retry`, { method: "POST" }),
     },

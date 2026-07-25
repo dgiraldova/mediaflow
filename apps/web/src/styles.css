@@ -951,6 +951,16 @@ h3,
   font-weight: 600;
 }
 
+.processing-progress {
+  overflow: hidden;
+  color: #7a5b1d;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: capitalize;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .moment-count svg {
   color: #67944e;
 }

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "../App";
@@ -111,5 +111,80 @@ describe("MediaFlow frontend", () => {
     expect(screen.getByText("Live purposeful moment")).toBeInTheDocument();
     expect(screen.getByText(/came from Postgres/i)).toBeInTheDocument();
     expect(api.assets.get).toHaveBeenCalledWith("customer-story");
+  });
+
+  it("loads the Library from the live organization and polls processing status", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    window.localStorage.setItem("mediaflow.access_token", "signed.jwt");
+    vi.spyOn(api.assets, "list").mockResolvedValue([
+      {
+        id: "asset-live",
+        organization_id: "demo-org",
+        original_filename: "founder_notes_live.mov",
+        media_type: "video",
+        status: "processing",
+        byte_size: 8_400_000,
+        duration_ms: null,
+        width: null,
+        height: null,
+        error_message: null,
+      },
+    ]);
+    vi.spyOn(api.assets, "processingJob").mockResolvedValue({
+      id: "job-live",
+      asset_id: "asset-live",
+      stage: "transcription",
+      status: "processing",
+      progress: 42,
+      error_message: null,
+    });
+
+    renderApp("/library");
+
+    expect(await screen.findByText("Founder Notes Live")).toBeInTheDocument();
+    expect(api.assets.list).toHaveBeenCalledWith({ organization_id: "demo-org" });
+    await waitFor(() => {
+      expect(api.assets.processingJob).toHaveBeenCalledWith("asset-live");
+    });
+    expect(await screen.findByText("transcription · 42%")).toBeInTheDocument();
+  });
+
+  it("initiates and completes a live upload before refreshing Library", async () => {
+    const user = userEvent.setup();
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    window.localStorage.setItem("mediaflow.access_token", "signed.jwt");
+    vi.spyOn(api.assets, "list").mockResolvedValue([]);
+    vi.spyOn(api.uploads, "initiate").mockResolvedValue({
+      asset_id: "asset-uploaded",
+      upload_id: "upload-live",
+      upload_key: "organizations/demo-org/assets/asset-uploaded/new-story.mp4",
+      status: "uploading",
+    });
+    vi.spyOn(api.uploads, "complete").mockResolvedValue({
+      asset_id: "asset-uploaded",
+      upload_id: "upload-live",
+      status: "processing",
+    });
+
+    renderApp("/library");
+
+    await screen.findByText("Your library is ready for media");
+    await user.click(screen.getByRole("button", { name: /add media/i }));
+    const file = new File(["media"], "new-story.mp4", { type: "video/mp4" });
+    await user.upload(screen.getByLabelText(/drop video, images, or audio/i), file);
+    await user.click(screen.getByRole("button", { name: "Start upload" }));
+
+    expect(await screen.findByText("Upload registered — analysis queued")).toBeInTheDocument();
+    expect(api.uploads.initiate).toHaveBeenCalledWith({
+      organization_id: "demo-org",
+      original_filename: "new-story.mp4",
+      media_type: "video",
+    });
+    expect(api.uploads.complete).toHaveBeenCalledWith("upload-live", {
+      byte_size: file.size,
+    });
+    await waitFor(() => {
+      expect(api.assets.list).toHaveBeenCalledTimes(2);
+    });
   });
 });

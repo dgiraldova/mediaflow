@@ -43,4 +43,28 @@ describe("JWT API client", () => {
       code: "duplicate_asset",
     });
   });
+
+  it("requests organization assets and processing status through the live contract", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => ({}),
+    });
+    const client = createApiClient({
+      baseUrl: "http://localhost:3000/api/v1",
+      getAccessToken: () => "signed.jwt",
+      fetchImpl,
+    });
+
+    await client.assets.list({ organization_id: "demo-org" });
+    await client.assets.processingJob("asset-live");
+
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "http://localhost:3000/api/v1/assets?organization_id=demo-org",
+    );
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      "http://localhost:3000/api/v1/assets/asset-live/processing-job",
+    );
+  });
 });

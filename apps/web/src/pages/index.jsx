@@ -38,6 +38,7 @@ import {
 } from "../lib/demo-data";
 import { api } from "../lib/api";
 import {
+  applyProcessingJob,
   formatTimestamp,
   toAssetViewModel,
   toMomentViewModel,
@@ -236,20 +237,113 @@ export const OnboardingPage = () => {
 };
 
 export const LibraryPage = () => {
+  const liveApi = import.meta.env.VITE_DEMO_MODE === "false";
   const [view, setView] = useState("grid");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [libraryAssets, setLibraryAssets] = useState(liveApi ? [] : assets);
+  const [loading, setLoading] = useState(liveApi);
+  const [error, setError] = useState("");
+
+  const loadAssets = useCallback(
+    async ({ showLoading = true } = {}) => {
+      if (!liveApi) return;
+      if (showLoading) setLoading(true);
+      setError("");
+
+      try {
+        const response = await api.assets.list({ organization_id: "demo-org" });
+        setLibraryAssets(response.map(toAssetViewModel));
+      } catch (libraryError) {
+        setError(libraryError.message);
+      } finally {
+        if (showLoading) setLoading(false);
+      }
+    },
+    [liveApi],
+  );
+
+  useEffect(() => {
+    void loadAssets();
+  }, [loadAssets]);
+
+  const pollableAssetKey = libraryAssets
+    .filter((asset) => ["pending", "processing", "uploading"].includes(asset.status))
+    .map((asset) => asset.id)
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    if (!liveApi || !pollableAssetKey) return undefined;
+
+    let cancelled = false;
+    const assetIds = pollableAssetKey.split("|");
+    const pollProcessingJobs = async () => {
+      const results = await Promise.allSettled(
+        assetIds.map((assetId) => api.assets.processingJob(assetId)),
+      );
+      if (cancelled) return;
+
+      const jobsByAssetId = new Map();
+      let reachedTerminalStatus = false;
+      results.forEach((result) => {
+        if (result.status !== "fulfilled") return;
+        jobsByAssetId.set(result.value.asset_id, result.value);
+        if (["completed", "failed"].includes(result.value.status)) {
+          reachedTerminalStatus = true;
+        }
+      });
+
+      setLibraryAssets((currentAssets) => {
+        let changed = false;
+        const nextAssets = currentAssets.map((asset) => {
+          const job = jobsByAssetId.get(asset.id);
+          if (!job) return asset;
+          const nextAsset = applyProcessingJob(asset, job);
+          if (
+            nextAsset.status === asset.status &&
+            nextAsset.processingStage === asset.processingStage &&
+            nextAsset.processingProgress === asset.processingProgress &&
+            nextAsset.error === asset.error
+          ) {
+            return asset;
+          }
+          changed = true;
+          return nextAsset;
+        });
+        return changed ? nextAssets : currentAssets;
+      });
+
+      if (reachedTerminalStatus) {
+        void loadAssets({ showLoading: false });
+      }
+    };
+
+    void pollProcessingJobs();
+    const pollingInterval = window.setInterval(pollProcessingJobs, 2_500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollingInterval);
+    };
+  }, [liveApi, loadAssets, pollableAssetKey]);
 
   const visibleAssets = useMemo(
     () =>
-      assets.filter(
+      libraryAssets.filter(
         (asset) =>
-          (status === "all" || asset.status === status) &&
+          (status === "all" ||
+            asset.status === status ||
+            (status === "processing" &&
+              ["pending", "processing", "uploading"].includes(asset.status))) &&
           `${asset.name} ${asset.fileName}`.toLowerCase().includes(query.toLowerCase()),
       ),
-    [query, status],
+    [libraryAssets, query, status],
   );
+
+  const processingCount = libraryAssets.filter((asset) =>
+    ["pending", "processing", "uploading"].includes(asset.status),
+  ).length;
 
   return (
     <>
@@ -271,7 +365,15 @@ export const LibraryPage = () => {
         <div>
           <strong>Your library is getting smarter</strong>
           <p>
-            MediaFlow found <b>61 useful moments</b> across your latest uploads.
+            {liveApi ? (
+              <>
+                <b>{libraryAssets.length} assets</b> synced from the live workspace.
+              </>
+            ) : (
+              <>
+                MediaFlow found <b>61 useful moments</b> across your latest uploads.
+              </>
+            )}
           </p>
         </div>
         <Link to="/search?q=show+me+the+best+customer+moments">
@@ -294,7 +396,9 @@ export const LibraryPage = () => {
               onClick={() => setStatus(value)}
             >
               {label}
-              {value === "processing" && <span className="tab-count">1</span>}
+              {value === "processing" && processingCount > 0 && (
+                <span className="tab-count">{processingCount}</span>
+              )}
             </button>
           ))}
         </div>
@@ -332,17 +436,41 @@ export const LibraryPage = () => {
         </div>
       </div>
 
-      <section className={`media-grid ${view === "list" ? "list-view" : ""}`}>
-        {visibleAssets.map((asset) => (
-          <MediaCard key={asset.id} asset={asset} />
-        ))}
-      </section>
+      {loading ? (
+        <div className="request-state" role="status">
+          <span className="loading-spinner" aria-hidden="true" />
+          <div>
+            <strong>Loading your live library</strong>
+            <p>Fetching organization media and processing state.</p>
+          </div>
+        </div>
+      ) : error ? (
+        <div className="request-state error-state" role="alert">
+          <div>
+            <strong>We could not load the library</strong>
+            <p>{error}</p>
+          </div>
+          <button className="button secondary" type="button" onClick={() => loadAssets()}>
+            Try again
+          </button>
+        </div>
+      ) : (
+        <section className={`media-grid ${view === "list" ? "list-view" : ""}`}>
+          {visibleAssets.map((asset) => (
+            <MediaCard key={asset.id} asset={asset} />
+          ))}
+        </section>
+      )}
 
-      {visibleAssets.length === 0 && (
+      {!loading && !error && visibleAssets.length === 0 && (
         <div className="empty-state">
           <Search size={24} />
-          <h2>No files match those filters</h2>
-          <p>Try clearing your search or choosing another processing status.</p>
+          <h2>{libraryAssets.length === 0 ? "Your library is ready for media" : "No files match"}</h2>
+          <p>
+            {libraryAssets.length === 0
+              ? "Upload your first file to start building a searchable purpose gallery."
+              : "Try clearing your search or choosing another processing status."}
+          </p>
           <button
             className="button secondary"
             type="button"
@@ -356,7 +484,13 @@ export const LibraryPage = () => {
         </div>
       )}
 
-      <UploadDialog open={uploadOpen} onClose={() => setUploadOpen(false)} />
+      <UploadDialog
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        onUploaded={() => loadAssets({ showLoading: false })}
+        liveApi={liveApi}
+        organizationId="demo-org"
+      />
     </>
   );
 };

@@ -46,11 +46,18 @@ export const MediaCard = ({ asset }) => (
         </div>
         <div className="media-card-meta">
           <StatusPill status={asset.status} compact />
-          {asset.moments > 0 && (
+          {asset.processingProgress != null &&
+          ["pending", "processing", "uploading"].includes(asset.status) ? (
+            <span className="processing-progress">
+              {asset.processingStage} · {asset.processingProgress}%
+            </span>
+          ) : (
+            asset.moments > 0 && (
             <span className="moment-count">
               <Sparkles size={12} aria-hidden="true" />
               {asset.moments} moments
             </span>
+            )
           )}
         </div>
       </div>

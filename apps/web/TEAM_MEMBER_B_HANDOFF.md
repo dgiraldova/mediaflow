@@ -1,21 +1,43 @@
 # Team Member B handoff
 
-This frontend is complete enough to integrate against the backend incrementally.
-It intentionally does not include Express routes, Knex migrations, Postgres
-tables, JWT signing/verification, search implementation, or media workers.
+Team A's frontend is wired to the current FastAPI backend for authentication,
+Library, Upload registration, processing status, Search, and Asset Detail.
+Demo mode remains available for frontend-only work.
 
 ## Where Team Member A stopped
 
 - React/Vite ECMAScript application: `apps/web`
-- JWT-aware API client: `packages/api-client`
+- JWT-aware ECMAScript API client: `packages/api-client`
 - Frontend runtime constants and validators:
   `packages/shared-types/frontend`
-- Demo-mode workflows exist for login, onboarding, library, asset detail,
-  transcript seeking, semantic search, upload progress, collections, and team
-  invitations.
-- The app defaults to demo mode while the backend is unavailable.
+- Live Library:
+  `GET /api/v1/assets?organization_id=demo-org`
+- Live Upload registration:
+  `POST /api/v1/uploads/initiate`, followed by
+  `POST /api/v1/uploads/{upload_id}/complete`
+- Live processing polling:
+  `GET /api/v1/assets/{asset_id}/processing-job` every 2.5 seconds for queued,
+  uploading, or processing assets
+- Live Search:
+  `POST /api/v1/search`
+- Live Asset Detail:
+  `GET /api/v1/assets/{asset_id}`, `/transcript`, and `/moments`
 
-## Backend contract already consumed
+Set these values in `apps/web/.env.local` to exercise the integration:
+
+```dotenv
+VITE_API_URL=http://127.0.0.1:3000/api/v1
+VITE_DEMO_MODE=false
+```
+
+The seeded account is:
+
+```text
+alex@northstar.studio
+mediaflow-demo
+```
+
+## Frontend/backend contract
 
 The API client prefixes routes with `/api/v1` and sends:
 
@@ -25,81 +47,60 @@ Accept: application/json
 Content-Type: application/json
 ```
 
-Expected error body:
+The exact methods and routes are defined in
+`packages/api-client/src/index.js`.
+
+Library expects `GET /assets` to return an array of the backend `AssetOut`
+shape. Upload sends:
 
 ```json
 {
-  "code": "stable_machine_code",
-  "message": "Human-readable message",
-  "details": {}
+  "organization_id": "demo-org",
+  "original_filename": "example.mp4",
+  "media_type": "video"
 }
 ```
 
-The exact frontend methods and routes are defined in
-`packages/api-client/src/index.js`. Treat that file as the current integration
-contract until an OpenAPI-generated client replaces it.
-
-## Next action instructions
-
-1. Create `apps/api` with Express in ECMAScript and keep every route under
-   `/api/v1`.
-2. Configure Knex for Postgres and create the first migrations for users,
-   organizations, organization memberships, assets, uploads, transcripts,
-   media moments, collections, collection items, and clip exports.
-3. Implement JWT issuance and verification. Include at least `sub`, `iat`, and
-   `exp`; resolve organization membership server-side rather than trusting an
-   organization role supplied by the browser.
-4. Add authentication middleware that rejects missing, expired, and malformed
-   tokens consistently. Never return password hashes or signing secrets.
-5. Implement these endpoints first, in integration order:
-   - `POST /auth/register`
-   - `POST /auth/login`
-   - `POST /auth/refresh`
-   - `GET /auth/me`
-   - `GET /organizations`
-   - `GET /assets`
-   - `GET /assets/:asset_id`
-   - `GET /assets/:asset_id/transcript`
-   - `GET /assets/:asset_id/moments`
-   - `POST /search`
-   - `GET` and `POST /collections`
-   - `GET /organizations/:organization_id/members`
-   - `POST /organizations/:organization_id/invitations`
-6. Add upload initiation/completion only after the media-storage contract is
-   agreed with Team Member C. Large media must upload directly to object storage.
-7. Allow CORS from `http://127.0.0.1:5173` in local development and expose the
-   API on `http://localhost:3000`.
-8. Copy `apps/web/.env.example` to `apps/web/.env.local`, set
-   `VITE_DEMO_MODE=false`, and run the web app against the Express API.
-9. Verify every query is scoped by the authenticated user's organization.
-   Attempt cross-organization asset, transcript, search, and collection access
-   in automated tests.
-10. Before asking Member A to integrate, run the backend test suite and provide
-    an OpenAPI document or sample successful and failing payloads for each route.
-
-For `POST /auth/login`, return at minimum:
+Completion sends the browser file size:
 
 ```json
 {
-  "access_token": "signed-jwt",
-  "token_type": "Bearer",
-  "expires_in": 900
+  "byte_size": 12345
 }
 ```
 
-Prefer a short-lived access JWT plus a rotated refresh token in a
-`Secure`, `HttpOnly`, `SameSite` cookie. Do not return the refresh token to
-browser JavaScript.
+Processing polling consumes `asset_id`, `stage`, `status`, `progress`, and
+`error_message`. The frontend maps `queued` to `pending` and `completed` to
+`ready`, and refreshes Library metadata after a terminal job result.
 
-## Checks for Team Member B
+## Next action instructions for Team Member B
 
-- `pnpm check` must continue to pass from the repository root.
-- A `401` should be returned when the bearer token is absent or invalid.
-- A `403` should be returned when the user is authenticated but lacks
-  organization access.
-- A missing organization-owned resource should not leak whether another
-  organization owns it.
-- Duplicate upload initiation should use HTTP `409` and the
-  `duplicate_asset` error code.
-- Database migrations must be reversible and runnable against a clean Postgres
-  database.
+1. Pull `team-a/purpose-gallery-frontend` and run `corepack pnpm check`.
+2. Start the API on port 3000 and the web app on port 5173 with live mode
+   enabled.
+3. Sign in, confirm the seeded assets load in Library, and verify that Search
+   and Asset Detail still use the same JWT session.
+4. Select a small file in **Add media** and verify the initiate and complete
+   calls return `201` and `200`. Confirm the new asset appears as queued and
+   that the browser polls its processing job.
+5. Run a Team C worker update and confirm the card moves from queued to
+   analyzing to ready without refreshing the browser.
+6. Decide the remaining binary-transfer contract with Team C. The current
+   initiate response returns `upload_key` but no signed upload URL, so Team A
+   registers the file metadata and completes the provided API lifecycle; it
+   does not upload file bytes to object storage yet.
+7. Replace the hard-coded `demo-org` with an organization selected from the
+   authenticated user's memberships before production use.
+8. Investigate the backend pytest/TestClient hang. The isolated live-server
+   contract passes, but `.venv/bin/python -m pytest -q` currently stalls.
+
+## Validation completed by Team A
+
+- ESLint passed.
+- 13 Vitest tests passed.
+- Vite production build passed.
+- Isolated live API contract passed:
+  login `200`, Library `200`, initiate `201`, complete `200`, and
+  processing-job `200`.
+
+The temporary contract-test database was removed after validation.

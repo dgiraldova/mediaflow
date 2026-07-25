@@ -28,14 +28,14 @@ export const formatBytes = (bytes) => {
   return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 };
 
-const normalizeStatus = (status) =>
+export const normalizeStatus = (status) =>
   ({
     queued: "pending",
     completed: "ready",
     aborted: "failed",
   })[status] ?? status;
 
-export const toAssetViewModel = (asset) => ({
+export const toAssetViewModel = (asset, index = 0) => ({
   id: asset.id,
   name: titleFromFileName(asset.original_filename),
   fileName: asset.original_filename,
@@ -48,13 +48,22 @@ export const toAssetViewModel = (asset) => ({
   moments: 0,
   size: formatBytes(asset.byte_size),
   visual: asset.media_type === "image" ? "object" : "portrait",
-  colors: artworkPalettes[0],
+  colors: artworkPalettes[index % artworkPalettes.length],
   width: asset.width,
   height: asset.height,
+  error: asset.error_message,
   description:
     asset.status === "ready"
       ? "This asset is indexed and ready for transcript and moment discovery."
       : `Live processing status: ${normalizeStatus(asset.status)}.`,
+});
+
+export const applyProcessingJob = (asset, job) => ({
+  ...asset,
+  status: normalizeStatus(job.status),
+  processingStage: job.stage,
+  processingProgress: job.progress,
+  error: job.error_message ?? asset.error,
 });
 
 export const toTranscriptViewModel = (segment) => ({

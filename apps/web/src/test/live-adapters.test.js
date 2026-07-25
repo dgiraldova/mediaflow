@@ -1,4 +1,5 @@
 import {
+  applyProcessingJob,
   formatBytes,
   formatTimestamp,
   toAssetViewModel,
@@ -41,6 +42,25 @@ describe("live API view-model adapters", () => {
       assetName: "Customer Story",
       timestamp: "00:31",
       reason: "Matched onboarding · Matched transcript",
+    });
+  });
+
+  it("applies processing-job progress to a library asset", () => {
+    expect(
+      applyProcessingJob(
+        { id: "asset-1", status: "processing" },
+        {
+          asset_id: "asset-1",
+          stage: "transcription",
+          status: "queued",
+          progress: 35,
+          error_message: null,
+        },
+      ),
+    ).toMatchObject({
+      status: "pending",
+      processingStage: "transcription",
+      processingProgress: 35,
     });
   });
 });
