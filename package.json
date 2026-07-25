@@ -1,0 +1,14 @@
+{
+  "name": "mediaflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "dev": "corepack pnpm --filter @mediaflow/web dev",
+    "build": "corepack pnpm --filter @mediaflow/web build",
+    "test": "corepack pnpm --filter @mediaflow/web test",
+    "lint": "corepack pnpm --filter @mediaflow/web lint",
+    "check": "corepack pnpm lint && corepack pnpm test && corepack pnpm build"
+  }
+}
