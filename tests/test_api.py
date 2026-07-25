@@ -23,6 +23,34 @@ def test_upload_to_worker_update_to_status(tmp_path):
         assert asset.json()["duration_ms"] == 42000
 
 
+def test_frontend_upload_lifecycle(tmp_path):
+    with client(tmp_path) as api:
+        session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
+        headers = {"Authorization": f"Bearer {session.json()['access_token']}"}
+
+        initiated = api.post("/api/v1/uploads/initiate", headers=headers, json={"organization_id": "demo-org", "original_filename": "new-story.mp4", "media_type": "video"})
+        assert initiated.status_code == 201
+        assert initiated.json()["status"] == "uploading"
+
+        completed = api.post(f"/api/v1/uploads/{initiated.json()['upload_id']}/complete", headers=headers, json={"byte_size": 1234})
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "processing"
+
+        processed = api.patch(f"/api/v1/internal/assets/{initiated.json()['asset_id']}/processing", headers={"X-Internal-Token": "worker-secret"}, json={"stage": "proxy", "status": "completed", "progress": 100})
+        assert processed.status_code == 200
+        asset = api.get(f"/api/v1/assets/{initiated.json()['asset_id']}", headers=headers)
+        assert asset.json()["status"] == "ready"
+
+
+def test_upload_abort_is_authorized_and_terminal(tmp_path):
+    with client(tmp_path) as api:
+        initiated = api.post("/api/v1/uploads/initiate", headers={"X-User-Id": "demo-user"}, json={"organization_id": "demo-org", "original_filename": "cancel-me.mp4", "media_type": "video"})
+        aborted = api.post(f"/api/v1/uploads/{initiated.json()['upload_id']}/abort", headers={"X-User-Id": "demo-user"})
+        assert aborted.status_code == 204
+        asset = api.get(f"/api/v1/assets/{initiated.json()['asset_id']}", headers={"X-User-Id": "demo-user"})
+        assert asset.json()["status"] == "failed"
+
+
 def test_org_isolation_and_internal_token(tmp_path):
     with client(tmp_path) as api:
         created = api.post("/api/v1/organizations", headers={"X-User-Id": "other-user"}, json={"name": "Other", "slug": "other"})
