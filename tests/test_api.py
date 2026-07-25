@@ -4,7 +4,7 @@ from app.main import create_app
 
 
 def client(tmp_path):
-    app = create_app(database_url=f"sqlite:///{tmp_path / 'test.db'}", internal_worker_token="worker-secret")
+    app = create_app(database_url=f"sqlite:///{tmp_path / 'test.db'}", internal_worker_token="worker-secret", media_base_url="http://media.test")
     return TestClient(app)
 
 
@@ -49,6 +49,41 @@ def test_upload_abort_is_authorized_and_terminal(tmp_path):
         assert aborted.status_code == 204
         asset = api.get(f"/api/v1/assets/{initiated.json()['asset_id']}", headers={"X-User-Id": "demo-user"})
         assert asset.json()["status"] == "failed"
+
+
+def test_worker_derivatives_enable_playback_and_retry(tmp_path):
+    with client(tmp_path) as api:
+        worker = {"X-Internal-Token": "worker-secret"}
+        update = api.patch("/api/v1/internal/assets/customer-story/processing", headers=worker, json={"stage": "proxy", "status": "completed", "progress": 100, "proxy_key": "proxies/customer story.mp4", "thumbnail_key": "thumbs/customer-story.jpg"})
+        assert update.status_code == 200
+        playback = api.get("/api/v1/assets/customer-story/playback-url", headers={"X-User-Id": "demo-user"})
+        assert playback.status_code == 200
+        assert playback.json()["url"] == "http://media.test/proxies/customer%20story.mp4"
+
+        failed = api.post("/api/v1/uploads/initiate", headers={"X-User-Id": "demo-user"}, json={"organization_id": "demo-org", "original_filename": "retry.mp4", "media_type": "video"})
+        api.post(f"/api/v1/uploads/{failed.json()['upload_id']}/abort", headers={"X-User-Id": "demo-user"})
+        retry = api.post(f"/api/v1/assets/{failed.json()['asset_id']}/retry", headers={"X-User-Id": "demo-user"})
+        assert retry.status_code == 200
+        assert retry.json()["status"] == "queued"
+
+
+def test_worker_can_idempotently_persist_transcript_and_moments_for_search(tmp_path):
+    with client(tmp_path) as api:
+        asset = api.post("/api/v1/uploads/initiate", headers={"X-User-Id": "demo-user"}, json={"organization_id": "demo-org", "original_filename": "retention.mp4", "media_type": "video"}).json()
+        worker = {"X-Internal-Token": "worker-secret"}
+        transcript_payload = {"segments": [{"start_ms": 1000, "end_ms": 5000, "speaker": "Customer", "text": "We retained more customers after the onboarding changes."}]}
+        transcript = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/transcript", headers=worker, json=transcript_payload)
+        assert transcript.status_code == 200
+        assert transcript.json() == {"count": 1}
+
+        moments_payload = {"moments": [{"id": "retention-moment", "title": "Higher customer retention", "start_ms": 1000, "end_ms": 5000, "category": "Testimonial", "score": 95}]}
+        first = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/moments", headers=worker, json=moments_payload)
+        second = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/moments", headers=worker, json=moments_payload)
+        assert first.json() == second.json() == {"count": 1}
+
+        session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
+        results = api.post("/api/v1/search", headers={"Authorization": f"Bearer {session.json()['access_token']}"}, json={"query": "retained customers"})
+        assert any(result["moment_id"] == "retention-moment" for result in results.json()["results"])
 
 
 def test_org_isolation_and_internal_token(tmp_path):
