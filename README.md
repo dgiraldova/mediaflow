@@ -67,6 +67,18 @@ Set `error_message` when reporting `failed`. The status read endpoint is:
 curl http://127.0.0.1:3000/api/v1/assets/ASSET_ID -H 'X-User-Id: demo-user'
 ```
 
+When Team C has generated derivatives, include their storage object keys in the
+same worker update:
+
+```json
+{ "stage": "proxy", "status": "completed", "progress": 100,
+  "proxy_key": "proxies/ASSET_ID.mp4", "thumbnail_key": "thumbnails/ASSET_ID.jpg" }
+```
+
+Set `MEDIAFLOW_MEDIA_BASE_URL` to Team C's local server or media CDN. The
+frontend can then obtain the proxy through `GET /api/v1/assets/{asset_id}/playback-url`.
+Failed assets can be returned to Team C's queue with `POST /api/v1/assets/{asset_id}/retry`.
+
 After the browser has uploaded directly to storage, it calls
 `POST /api/v1/uploads/{upload_id}/complete` with an optional `byte_size`.
 This moves the asset from `uploading` to `processing`; Team C then reports
