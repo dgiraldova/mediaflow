@@ -146,6 +146,7 @@ def test_search_and_collections_are_scoped_to_authenticated_organization(tmp_pat
         assert search.status_code == 200
         result = search.json()["results"][0]
         assert result["asset_id"] == "customer-story"
+        assert result["asset_name"] == "acme_interview_final_v3.mp4"
         assert result["match_reasons"]
 
         created = api.post("/api/v1/collections", headers=headers, json={"name": "Customer voice", "description": "Useful proof points"})
