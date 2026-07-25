@@ -190,7 +190,15 @@ def test_worker_derivatives_enable_playback_and_retry(tmp_path):
 
 def test_worker_can_idempotently_persist_transcript_and_moments_for_search(tmp_path):
     with client(tmp_path) as api:
-        asset = api.post("/api/v1/uploads/initiate", headers={"X-User-Id": "demo-user"}, json={"organization_id": "demo-org", "original_filename": "retention.mp4", "media_type": "video"}).json()
+        user = {"X-User-Id": "demo-user"}
+        asset = api.post("/api/v1/uploads/initiate", headers=user, json={"organization_id": "demo-org", "original_filename": "retention.mp4", "media_type": "video"}).json()
+        content = store_upload(api, asset, user, b"searchable-media")
+        completed = api.post(
+            f"/api/v1/uploads/{asset['upload_id']}/complete",
+            headers=user,
+            json={"byte_size": len(content)},
+        )
+        assert completed.status_code == 200
         worker = {"X-Internal-Token": "worker-secret"}
         transcript_payload = {"segments": [{"start_ms": 1000, "end_ms": 5000, "speaker": "Customer", "text": "We retained more customers after the onboarding changes."}]}
         transcript = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/transcript", headers=worker, json=transcript_payload)
@@ -204,7 +212,14 @@ def test_worker_can_idempotently_persist_transcript_and_moments_for_search(tmp_p
 
         session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
         results = api.post("/api/v1/search", headers={"Authorization": f"Bearer {session.json()['access_token']}"}, json={"query": "retained customers"})
-        assert any(result["moment_id"] == "retention-moment" for result in results.json()["results"])
+        match = next(
+            result
+            for result in results.json()["results"]
+            if result["moment_id"] == "retention-moment"
+        )
+        assert match["media_type"] == "video"
+        assert match["preview_url"].endswith(asset["upload_key"])
+        assert match["playback_url"] == match["preview_url"]
 
 
 def test_org_isolation_and_internal_token(tmp_path):

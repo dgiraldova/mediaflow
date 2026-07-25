@@ -1490,7 +1490,11 @@ h3,
 
 .result-preview {
   position: relative;
+  display: block;
+  overflow: hidden;
   min-height: 201px;
+  color: inherit;
+  text-decoration: none;
   background:
     radial-gradient(circle at 68% 34%, rgba(255, 255, 255, 0.65), transparent 5%),
     radial-gradient(ellipse at 50% 78%, var(--art-color-b) 0 21%, transparent 22%),
@@ -1510,8 +1514,44 @@ h3,
   box-shadow: 0 -7px 0 color-mix(in srgb, var(--art-color-b) 76%, #181f1d);
 }
 
+.result-preview.has-media-preview::before {
+  display: none;
+}
+
+.result-preview.has-media-preview::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(8, 22, 18, 0.16),
+    transparent 38%,
+    rgba(8, 22, 18, 0.2)
+  );
+}
+
+.result-preview-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.result-preview-video {
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+
+.result-preview-video.is-ready {
+  opacity: 1;
+}
+
 .result-rank {
   position: absolute;
+  z-index: 2;
   top: 11px;
   left: 11px;
   color: rgba(255, 255, 255, 0.72);
@@ -1522,6 +1562,7 @@ h3,
 
 .result-play {
   position: absolute;
+  z-index: 2;
   top: 50%;
   left: 50%;
   width: 38px;
@@ -1537,6 +1578,7 @@ h3,
 
 .result-timestamp {
   position: absolute;
+  z-index: 2;
   right: 10px;
   bottom: 10px;
   border-radius: 5px;

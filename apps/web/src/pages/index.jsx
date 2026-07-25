@@ -518,6 +518,69 @@ export const LibraryPage = () => {
   );
 };
 
+const SearchResultPreview = ({ result, index }) => {
+  const [videoFrameReady, setVideoFrameReady] = useState(false);
+  const imageUrl =
+    result.thumbnailUrl ??
+    (result.mediaType === "image" ? result.previewUrl : null);
+  const videoUrl =
+    result.mediaType === "video"
+      ? result.playbackUrl ?? (!result.thumbnailUrl ? result.previewUrl : null)
+      : null;
+  const hasMediaPreview = Boolean(imageUrl || videoUrl);
+  const destination = `/library/assets/${result.assetId}?start=${result.startMs}`;
+
+  const seekToMoment = (event) => {
+    const video = event.currentTarget;
+    const requestedTime = Math.max(0, result.startMs / 1_000);
+    const lastFrame =
+      Number.isFinite(video.duration) && video.duration > 0
+        ? Math.max(0, video.duration - 0.1)
+        : requestedTime;
+    video.currentTime = Math.min(requestedTime, lastFrame);
+  };
+
+  return (
+    <Link
+      className={`result-preview ${hasMediaPreview ? "has-media-preview" : ""}`}
+      style={{
+        "--art-color-a": result.colors[0],
+        "--art-color-b": result.colors[1],
+      }}
+      to={destination}
+      aria-label={`Preview ${result.title} at ${result.timestamp}`}
+    >
+      {imageUrl && (
+        <img
+          className="result-preview-media result-preview-image"
+          src={imageUrl}
+          alt=""
+          loading="lazy"
+        />
+      )}
+      {videoUrl && (
+        <video
+          className={`result-preview-media result-preview-video ${
+            videoFrameReady ? "is-ready" : ""
+          }`}
+          src={`${videoUrl}#t=${Math.max(0, result.startMs / 1_000)}`}
+          preload="metadata"
+          muted
+          playsInline
+          aria-hidden="true"
+          onLoadedMetadata={seekToMoment}
+          onSeeked={() => setVideoFrameReady(true)}
+        />
+      )}
+      <span className="result-rank">0{index + 1}</span>
+      <span className="result-play">
+        <Play size={17} fill="currentColor" />
+      </span>
+      <span className="result-timestamp">{result.timestamp}</span>
+    </Link>
+  );
+};
+
 export const SearchPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialQuery = searchParams.get("q") ?? "customer saying onboarding was easier than expected";
@@ -664,19 +727,7 @@ export const SearchPage = () => {
           <div className="search-result-list" data-search-id={searchId ?? undefined}>
             {results.map((result, index) => (
             <article className="search-result-card" key={result.id}>
-              <div
-                className="result-preview"
-                style={{
-                  "--art-color-a": result.colors[0],
-                  "--art-color-b": result.colors[1],
-                }}
-              >
-                <span className="result-rank">0{index + 1}</span>
-                <span className="result-play">
-                  <Play size={17} fill="currentColor" />
-                </span>
-                <span className="result-timestamp">{result.timestamp}</span>
-              </div>
+              <SearchResultPreview result={result} index={index} />
               <div className="result-copy">
                 <div className="result-title-row">
                   <div>

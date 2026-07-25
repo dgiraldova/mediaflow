@@ -360,6 +360,7 @@ class SearchInput(BaseModel):
 class SearchResultOut(BaseModel):
     asset_id: str
     asset_name: str
+    media_type: str
     moment_id: str
     title: str
     start_ms: int
@@ -367,6 +368,9 @@ class SearchResultOut(BaseModel):
     excerpt: str
     match_reasons: list[str]
     score: float
+    preview_url: str | None = None
+    thumbnail_url: str | None = None
+    playback_url: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -797,6 +801,7 @@ def create_app(
             )
         )
         results: list[SearchResultOut] = []
+        media_by_asset: dict[str, AssetOut] = {}
         for moment, asset in candidates:
             segment = db.scalar(
                 select(TranscriptSegment)
@@ -809,10 +814,15 @@ def create_app(
             if terms and not matched_terms:
                 continue
             score = round(len(matched_terms) / max(len(terms), 1), 2)
+            media = media_by_asset.get(asset.id)
+            if media is None:
+                media = asset_output(asset, db)
+                media_by_asset[asset.id] = media
             results.append(
                 SearchResultOut(
                     asset_id=asset.id,
                     asset_name=asset.original_filename,
+                    media_type=asset.media_type,
                     moment_id=moment.id,
                     title=moment.title,
                     start_ms=moment.start_ms,
@@ -820,6 +830,9 @@ def create_app(
                     excerpt=excerpt,
                     match_reasons=[f"Matched: {', '.join(matched_terms)}"] if matched_terms else ["Browse result"],
                     score=score,
+                    preview_url=media.preview_url,
+                    thumbnail_url=media.thumbnail_url,
+                    playback_url=media.playback_url,
                 )
             )
         results.sort(key=lambda item: item.score, reverse=True)

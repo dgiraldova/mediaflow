@@ -37,11 +37,18 @@ describe("live API view-model adapters", () => {
         excerpt: "It was easier than expected.",
         match_reasons: ["Matched onboarding", "Matched transcript"],
         score: 1,
+        media_type: "video",
+        preview_url: "http://media.test/thumbnail.jpg",
+        thumbnail_url: "http://media.test/thumbnail.jpg",
+        playback_url: "http://media.test/proxy.mp4",
       }),
     ).toMatchObject({
       assetName: "Customer Story",
       timestamp: "00:31",
       reason: "Matched onboarding · Matched transcript",
+      mediaType: "video",
+      thumbnailUrl: "http://media.test/thumbnail.jpg",
+      playbackUrl: "http://media.test/proxy.mp4",
     });
   });
 

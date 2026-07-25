@@ -58,6 +58,10 @@ describe("MediaFlow frontend", () => {
           excerpt: "This excerpt came from the API.",
           match_reasons: ["Matched live transcript"],
           score: 0.97,
+          media_type: "video",
+          preview_url: "http://media.test/live-thumbnail.jpg",
+          thumbnail_url: "http://media.test/live-thumbnail.jpg",
+          playback_url: "http://media.test/live-proxy.mp4",
         },
       ],
     });
@@ -66,6 +70,18 @@ describe("MediaFlow frontend", () => {
 
     expect(await screen.findByText("Live onboarding result")).toBeInTheDocument();
     expect(screen.getByText(/this excerpt came from the api/i)).toBeInTheDocument();
+    const preview = screen.getByRole("link", {
+      name: "Preview Live onboarding result at 00:31",
+    });
+    expect(preview).toHaveClass("has-media-preview");
+    expect(preview.querySelector("img")).toHaveAttribute(
+      "src",
+      "http://media.test/live-thumbnail.jpg",
+    );
+    expect(preview.querySelector("video")).toHaveAttribute(
+      "src",
+      "http://media.test/live-proxy.mp4#t=31",
+    );
     expect(api.search.query).toHaveBeenCalledWith({ query: "easy onboarding" });
   });
 
