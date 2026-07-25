@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import uuid
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -18,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, func, select
+from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, delete, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -29,6 +30,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./mediaflow-demo.db"
     internal_worker_token: str = "change-me-before-sharing"
     jwt_secret: str = "replace-with-a-long-random-local-secret"
+    media_base_url: str | None = None
 
 
 class Base(DeclarativeBase):
@@ -96,6 +98,15 @@ class ProcessingJob(Base):
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class AssetDerivative(Base):
+    __tablename__ = "asset_derivatives"
+
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id"), primary_key=True)
+    proxy_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    thumbnail_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -224,7 +235,42 @@ class ProcessingUpdate(BaseModel):
     duration_ms: int | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=0)
     height: int | None = Field(default=None, ge=0)
+    proxy_key: str | None = Field(default=None, max_length=500)
+    thumbnail_key: str | None = Field(default=None, max_length=500)
     error_message: str | None = Field(default=None, max_length=500)
+
+
+class PlaybackUrlOut(BaseModel):
+    url: str
+    expires_in: int = 300
+
+
+class WorkerTranscriptSegment(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    speaker: str | None = Field(default=None, max_length=120)
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class WorkerTranscriptReplace(BaseModel):
+    segments: list[WorkerTranscriptSegment] = Field(max_length=2_000)
+
+
+class WorkerMoment(BaseModel):
+    id: str = Field(min_length=1, max_length=36)
+    title: str = Field(min_length=1, max_length=255)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    category: str = Field(min_length=1, max_length=100)
+    score: int = Field(ge=0, le=100)
+
+
+class WorkerMomentsReplace(BaseModel):
+    moments: list[WorkerMoment] = Field(max_length=500)
+
+
+class PersistedCount(BaseModel):
+    count: int
 
 
 class LoginInput(BaseModel):
@@ -268,6 +314,7 @@ class SearchInput(BaseModel):
 
 class SearchResultOut(BaseModel):
     asset_id: str
+    asset_name: str
     moment_id: str
     title: str
     start_ms: int
@@ -309,12 +356,14 @@ def create_app(
     database_url: str | None = None,
     internal_worker_token: str | None = None,
     jwt_secret: str | None = None,
+    media_base_url: str | None = None,
 ) -> FastAPI:
     settings = Settings()
     engine = make_engine(database_url or settings.database_url)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     token = internal_worker_token or settings.internal_worker_token
     signing_secret = jwt_secret or settings.jwt_secret
+    configured_media_base_url = media_base_url or settings.media_base_url
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -508,6 +557,36 @@ def create_app(
         require_membership(asset.organization_id, user_id, db)
         return list(db.scalars(select(MediaMoment).where(MediaMoment.asset_id == asset_id).order_by(MediaMoment.start_ms)))
 
+    @app.get("/api/v1/assets/{asset_id}/playback-url", response_model=PlaybackUrlOut)
+    def get_playback_url(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> PlaybackUrlOut:
+        asset = get_asset_or_404(asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        derivative = db.get(AssetDerivative, asset_id)
+        if not derivative or not derivative.proxy_key:
+            raise HTTPException(status_code=409, detail="A playable proxy is not available yet")
+        if not configured_media_base_url:
+            raise HTTPException(status_code=503, detail="Media delivery is not configured")
+        return PlaybackUrlOut(url=f"{configured_media_base_url.rstrip('/')}/{quote(derivative.proxy_key)}")
+
+    @app.post("/api/v1/assets/{asset_id}/retry", response_model=ProcessingJobOut)
+    def retry_asset(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> ProcessingJob:
+        asset = get_asset_or_404(asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        if asset.status != "failed":
+            raise HTTPException(status_code=409, detail="Only failed assets can be retried")
+        job = db.scalar(select(ProcessingJob).where(ProcessingJob.asset_id == asset_id).order_by(ProcessingJob.created_at.desc()))
+        if not job:
+            raise HTTPException(status_code=404, detail="Processing job not found")
+        asset.status = "processing"
+        asset.error_message = None
+        job.stage = "queued"
+        job.status = "queued"
+        job.progress = 0
+        job.error_message = None
+        db.commit()
+        db.refresh(job)
+        return job
+
     @app.post("/api/v1/search", response_model=SearchResponse)
     def search(payload: SearchInput, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> SearchResponse:
         organization_id = organization_for_request(payload.organization_id, user_id, db)
@@ -535,6 +614,7 @@ def create_app(
             results.append(
                 SearchResultOut(
                     asset_id=asset.id,
+                    asset_name=asset.original_filename,
                     moment_id=moment.id,
                     title=moment.title,
                     start_ms=moment.start_ms,
@@ -597,6 +677,49 @@ def create_app(
             raise HTTPException(status_code=404, detail="Processing job not found")
         return job
 
+    @app.put("/api/v1/internal/assets/{asset_id}/transcript", response_model=PersistedCount, dependencies=[Depends(require_internal_token)])
+    def replace_transcript(asset_id: str, payload: WorkerTranscriptReplace, db: Session = Depends(get_db)) -> PersistedCount:
+        get_asset_or_404(asset_id, db)
+        validate_time_ranges(payload.segments)
+        db.execute(delete(TranscriptSegment).where(TranscriptSegment.asset_id == asset_id))
+        db.add_all(
+            TranscriptSegment(
+                asset_id=asset_id,
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                speaker=segment.speaker,
+                text=segment.text,
+            )
+            for segment in payload.segments
+        )
+        db.commit()
+        return PersistedCount(count=len(payload.segments))
+
+    @app.put("/api/v1/internal/assets/{asset_id}/moments", response_model=PersistedCount, dependencies=[Depends(require_internal_token)])
+    def replace_moments(asset_id: str, payload: WorkerMomentsReplace, db: Session = Depends(get_db)) -> PersistedCount:
+        get_asset_or_404(asset_id, db)
+        validate_time_ranges(payload.moments)
+        existing = {moment.id: moment for moment in db.scalars(select(MediaMoment).where(MediaMoment.asset_id == asset_id))}
+        incoming_ids = {moment.id for moment in payload.moments}
+        for moment_id, moment in existing.items():
+            if moment_id not in incoming_ids:
+                db.execute(delete(CollectionItem).where(CollectionItem.moment_id == moment_id))
+                db.delete(moment)
+        for item in payload.moments:
+            moment = existing.get(item.id)
+            if moment:
+                moment.title = item.title
+                moment.start_ms = item.start_ms
+                moment.end_ms = item.end_ms
+                moment.category = item.category
+                moment.score = item.score
+            else:
+                if db.get(MediaMoment, item.id):
+                    raise HTTPException(status_code=409, detail="Moment identifier belongs to another asset")
+                db.add(MediaMoment(id=item.id, asset_id=asset_id, title=item.title, start_ms=item.start_ms, end_ms=item.end_ms, category=item.category, score=item.score))
+        db.commit()
+        return PersistedCount(count=len(payload.moments))
+
     @app.patch("/api/v1/internal/assets/{asset_id}/processing", response_model=ProcessingJobOut, dependencies=[Depends(require_internal_token)])
     def update_processing(asset_id: str, payload: ProcessingUpdate, db: Session = Depends(get_db)) -> ProcessingJob:
         asset = get_asset_or_404(asset_id, db)
@@ -610,6 +733,13 @@ def create_app(
         asset.height = payload.height if payload.height is not None else asset.height
         asset.error_message = payload.error_message
         job.stage, job.status, job.progress, job.error_message = payload.stage, payload.status, payload.progress, payload.error_message
+        if payload.proxy_key is not None or payload.thumbnail_key is not None:
+            validate_storage_key(payload.proxy_key)
+            validate_storage_key(payload.thumbnail_key)
+            derivative = db.get(AssetDerivative, asset_id) or AssetDerivative(asset_id=asset_id)
+            derivative.proxy_key = payload.proxy_key if payload.proxy_key is not None else derivative.proxy_key
+            derivative.thumbnail_key = payload.thumbnail_key if payload.thumbnail_key is not None else derivative.thumbnail_key
+            db.add(derivative)
         db.commit()
         db.refresh(job)
         return job
@@ -658,6 +788,19 @@ def get_collection_or_404(collection_id: str, db: Session) -> Collection:
     if not collection:
         raise HTTPException(status_code=404, detail="Collection not found")
     return collection
+
+
+def validate_storage_key(key: str | None) -> None:
+    if key is None:
+        return
+    if key.startswith("/") or ".." in key.split("/"):
+        raise HTTPException(status_code=422, detail="Storage key must be a relative object key")
+
+
+def validate_time_ranges(items: list[WorkerTranscriptSegment] | list[WorkerMoment]) -> None:
+    for item in items:
+        if item.end_ms <= item.start_ms:
+            raise HTTPException(status_code=422, detail="End time must be after start time")
 
 
 def collection_output(collection: Collection, db: Session) -> CollectionOut:
