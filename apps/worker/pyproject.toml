@@ -1,0 +1,53 @@
+[project]
+name = "mediaflow-worker"
+version = "0.1.0"
+description = "MediaFlow media-processing and Temporal worker application (Member C: media pipeline, AI and integrations)"
+requires-python = ">=3.12"
+dependencies = [
+  "temporalio>=1.7,<2",
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.3,<3",
+  "structlog>=24.1,<25",
+  "boto3>=1.34,<2",
+  "httpx>=0.27,<1",
+  "openai>=1.35,<2",
+  "google-api-python-client>=2.130,<3",
+  "google-auth>=2.30,<3",
+  "google-auth-oauthlib>=1.2,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2,<9",
+  "pytest-asyncio>=0.23,<1",
+  "ruff>=0.5,<1",
+  "mypy>=1.10,<2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# ASYNC230/240: activities intentionally hand open file objects to streaming
+# HTTP clients (OpenAI/Twelve Labs SDKs) and call os.path helpers on local
+# temp files. Genuinely long blocking work (checksums, boto3 transfers) is
+# already dispatched through asyncio.to_thread.
+ignore = ["ASYNC230", "ASYNC240"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["worker"]
