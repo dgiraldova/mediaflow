@@ -6,6 +6,11 @@
   "packageManager": "pnpm@10.12.4",
   "scripts": {
     "dev": "corepack pnpm --filter @mediaflow/web dev",
+    "dev:web": "corepack pnpm --filter @mediaflow/web dev",
+    "dev:api": ".venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 3000 --reload",
+    "dev:worker": "PATH=./var/tools/ffmpeg:$PATH PYTHONPATH=apps/worker .venv/bin/python -m worker.poller",
+    "worker:once": "PATH=./var/tools/ffmpeg:$PATH PYTHONPATH=apps/worker .venv/bin/python -m worker.poller --once",
+    "tools:ffmpeg": "bash scripts/dev/install_ffmpeg.sh",
     "build": "corepack pnpm --filter @mediaflow/web build",
     "test": "corepack pnpm --filter @mediaflow/web test",
     "lint": "corepack pnpm --filter @mediaflow/web lint",

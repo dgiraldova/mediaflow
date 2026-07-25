@@ -1,23 +1,38 @@
-# Mediaflow demo backend
+# MediaFlow purpose gallery
 
-This is the fastest local backend slice for the demo: an organization-scoped API
-that creates a video asset, accepts Team C's processing updates, and returns its
-current status. It deliberately uses SQLite and the `X-User-Id` demo header;
-replace them with Supabase Auth/Postgres/RLS after the demo.
+MediaFlow stores uploaded media locally, prepares playback proxies and
+thumbnails, and makes AI-produced transcripts and moments searchable. Local
+development uses SQLite plus `var/media`; Cloudflare R2 remains available as a
+later deployment option but is not required.
 
-## Run
+## Local setup
 
 ```sh
 cp .env.example .env
-/opt/homebrew/bin/python3.12 -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/uvicorn app.main:app --reload --port 3000
+.venv/bin/python -m pip install -e 'apps/worker[dev]'
+corepack pnpm install
 ```
 
-OpenAPI is available at `http://127.0.0.1:3000/docs`. The web client should use
-`http://localhost:3000/api/v1`; CORS is enabled for Vite on port 5173.
+Install FFmpeg/FFprobe system-wide or download workspace-local binaries without
+sudo:
 
-For the Team A frontend, set `VITE_DEMO_MODE=false` and sign in with:
+```sh
+corepack pnpm tools:ffmpeg
+```
+
+Then run these three processes from the repository root:
+
+```sh
+corepack pnpm dev:api
+corepack pnpm dev:worker
+VITE_DEMO_MODE=false corepack pnpm dev:web
+```
+
+Web: `http://127.0.0.1:5173` · API docs: `http://127.0.0.1:3000/docs`
+
+Sign in with:
 
 ```
 alex@northstar.studio
@@ -42,17 +57,25 @@ The response contains `search_id` and timestamped `results`, each with
 `name` (and optional `description`), then add a search result with
 `POST /api/v1/collections/{collection_id}/items` and `{ "moment_id": "..." }`.
 
-## Team C contract
+## Upload contract
 
-1. Create an asset before beginning work:
+The web client performs the complete local-storage flow:
 
-```sh
-curl -X POST http://127.0.0.1:3000/api/v1/uploads/initiate \
-  -H 'Content-Type: application/json' -H 'X-User-Id: demo-user' \
-  -d '{"organization_id":"demo-org","original_filename":"sample.mp4","media_type":"video"}'
+```text
+POST /api/v1/uploads/initiate
+PUT  /api/v1/uploads/{upload_id}/content
+POST /api/v1/uploads/{upload_id}/complete
 ```
 
-2. Report FFprobe/proxy progress using the returned `asset_id`:
+The `PUT` streams bytes to an atomic temporary file under `var/media`; complete
+verifies the stored size and SHA-256 before queuing the asset. The worker claims
+the job immediately, reads the same local file, then writes its proxy and
+thumbnail back into `var/media`. Aborting an incomplete upload removes its
+stored bytes.
+
+## Worker contract
+
+Report processing progress using the returned `asset_id`:
 
 ```sh
 curl -X PATCH http://127.0.0.1:3000/api/v1/internal/assets/ASSET_ID/processing \
@@ -75,8 +98,10 @@ same worker update:
   "proxy_key": "proxies/ASSET_ID.mp4", "thumbnail_key": "thumbnails/ASSET_ID.jpg" }
 ```
 
-Set `MEDIAFLOW_MEDIA_BASE_URL` to Team C's local server or media CDN. The
-frontend can then obtain the proxy through `GET /api/v1/assets/{asset_id}/playback-url`.
+The API serves local originals and generated derivatives through
+`/api/v1/media/{storage_key}` with HTTP Range support. The frontend receives
+durable `preview_url`, `thumbnail_url`, and `playback_url` fields from asset
+responses, so previews survive a browser refresh.
 Failed assets can be returned to Team C's queue with `POST /api/v1/assets/{asset_id}/retry`.
 
 ## Transcript and moment handoff
@@ -95,10 +120,9 @@ Transcript payloads contain `segments` with `start_ms`, `end_ms`, optional
 identical payload is idempotent; the persisted transcript and moments become
 available through the public asset and search endpoints immediately.
 
-After the browser has uploaded directly to storage, it calls
-`POST /api/v1/uploads/{upload_id}/complete` with optional `byte_size` and
-`checksum_sha256` (a 64-character SHA-256 digest). This moves the asset from
-`uploading` to `processing`. A checksum already present in the same
+After the browser has streamed bytes into local storage, it calls
+`POST /api/v1/uploads/{upload_id}/complete`. This moves the asset from
+`uploading` to `processing`. An identical SHA-256 already present in the same
 organization returns `409` with code `duplicate_asset`.
 
 Team C can now claim completed uploads with the internal token:
@@ -122,5 +146,6 @@ completion through `POST /api/v1/uploads/{upload_id}/abort`.
 ## Verification
 
 ```sh
-.venv/bin/python -m pytest
+corepack pnpm check
+PYTHONPATH=apps/worker .venv/bin/python -m pytest
 ```

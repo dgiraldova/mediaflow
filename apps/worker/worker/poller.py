@@ -25,6 +25,7 @@ import hashlib
 import os
 import shutil
 import uuid
+from typing import Any, Protocol, TypedDict
 
 import httpx
 
@@ -34,13 +35,39 @@ from worker.domain.models import MediaMomentDraft, TranscriptSegmentDraft
 from worker.logging import configure_logging, get_logger
 from worker.media.validation import UnsupportedMediaError, validate_media_file
 from worker.moments.segmentation import generate_candidate_moments
-from worker.providers.classification import MomentClassificationInput
+from worker.providers.classification import (
+    MomentClassificationInput,
+    NullClassificationProvider,
+)
 from worker.repositories.http_api import ApiClient, build_http_repositories
+from worker.repositories.interfaces import (
+    AssetRepository,
+    MomentRepository,
+    ProcessingJobRepository,
+    TranscriptRepository,
+)
 from worker.storage.keys import StorageKeyKind, build_storage_key
 
 logger = get_logger(__name__)
 
 POLL_INTERVAL_SECONDS = 5.0
+
+
+class ProbeResult(TypedDict):
+    duration_ms: int | None
+    width: int | None
+    height: int | None
+    orientation: str
+    has_audio: bool
+
+
+class PollerAssetRepository(AssetRepository, Protocol):
+    async def report_stage(
+        self,
+        *,
+        asset_id: str,
+        stage: ProcessingStage,
+    ) -> None: ...
 
 
 class JobFailed(Exception):
@@ -58,11 +85,11 @@ class IngestionPoller:
         *,
         settings: WorkerSettings,
         api: ApiClient,
-        assets,
-        jobs,
-        transcripts,
-        moments,
-        providers,
+        assets: PollerAssetRepository,
+        jobs: ProcessingJobRepository,
+        transcripts: TranscriptRepository,
+        moments: MomentRepository,
+        providers: dict[str, Any],
         simulate: bool = False,
         worker_id: str | None = None,
     ) -> None:
@@ -95,7 +122,7 @@ class IngestionPoller:
             await self._process(job)
         return len(claimed)
 
-    async def _process(self, job: dict) -> None:
+    async def _process(self, job: dict[str, object]) -> None:
         asset_id = str(job["asset_id"])
         organization_id = str(job["organization_id"])
         filename = str(job["original_filename"])
@@ -127,12 +154,12 @@ class IngestionPoller:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    async def _run_pipeline(self, job: dict, *, temp_dir: str) -> None:
+    async def _run_pipeline(self, job: dict[str, object], *, temp_dir: str) -> None:
         asset_id = str(job["asset_id"])
         organization_id = str(job["organization_id"])
         filename = str(job["original_filename"])
         upload_key = str(job["upload_key"])
-        byte_size = int(job.get("byte_size") or 0)
+        byte_size = int(str(job.get("byte_size") or 0))
 
         # -- validate --------------------------------------------------------
         try:
@@ -188,6 +215,7 @@ class IngestionPoller:
             StorageKeyKind.THUMBNAIL_MAIN, organization_id=organization_id, asset_id=asset_id
         )
         if not self._simulate:
+            assert local_path is not None
             await self._generate_derivatives(
                 local_path=local_path,
                 temp_dir=temp_dir,
@@ -268,7 +296,7 @@ class IngestionPoller:
             )
         await storage.download_to_path(key=upload_key, destination_path=destination)
 
-    async def _inspect(self, local_path: str) -> dict:
+    async def _inspect(self, local_path: str) -> ProbeResult:
         from worker.media.ffprobe import inspect_media
 
         try:
@@ -284,7 +312,13 @@ class IngestionPoller:
         }
 
     async def _generate_derivatives(
-        self, *, local_path: str, temp_dir: str, proxy_key: str, thumb_key: str, duration_ms
+        self,
+        *,
+        local_path: str,
+        temp_dir: str,
+        proxy_key: str,
+        thumb_key: str,
+        duration_ms: int | None,
     ) -> None:
         from worker.media.ffmpeg import generate_proxy, generate_thumbnails
 
@@ -305,7 +339,13 @@ class IngestionPoller:
         )
 
     async def _transcribe(
-        self, *, asset_id: str, organization_id: str, local_path, temp_dir: str, has_audio: bool
+        self,
+        *,
+        asset_id: str,
+        organization_id: str,
+        local_path: str | None,
+        temp_dir: str,
+        has_audio: bool,
     ) -> list[TranscriptSegmentDraft]:
         if not has_audio:
             return []
@@ -315,9 +355,21 @@ class IngestionPoller:
         else:
             from worker.media.ffmpeg import extract_audio
 
+            assert local_path is not None
             audio_path = os.path.join(temp_dir, "audio.wav")
             await extract_audio(input_path=local_path, output_path=audio_path)
-            results = await self._providers["transcription"].transcribe(audio_path=audio_path)
+            try:
+                results = await self._providers["transcription"].transcribe(
+                    audio_path=audio_path
+                )
+            except Exception as exc:
+                logger.warning(
+                    "provider.transcription_failed",
+                    asset_id=asset_id,
+                    error_type=type(exc).__name__,
+                    detail=str(exc)[:300],
+                )
+                results = []
             raw = [(r.start_ms, r.end_ms, r.text, r.speaker_label) for r in results]
 
         return [
@@ -336,14 +388,21 @@ class IngestionPoller:
             for i, (start, end, text, speaker) in enumerate(raw)
         ]
 
-    async def _index_with_provider(self, *, asset_id: str, local_path, probe: dict) -> str | None:
+    async def _index_with_provider(
+        self,
+        *,
+        asset_id: str,
+        local_path: str | None,
+        probe: ProbeResult,
+    ) -> str | None:
         if self._simulate or local_path is None:
             return None
         provider = self._providers["video_intelligence"]
         try:
-            return await provider.index_asset(
+            provider_asset_id = await provider.index_asset(
                 asset_id=asset_id, media_path=local_path, metadata=probe
             )
+            return str(provider_asset_id) if provider_asset_id else None
         except Exception as exc:
             # Provider indexing enriches search but is not required for an
             # asset to be usable, so a failure here must not fail the job.
@@ -363,20 +422,31 @@ class IngestionPoller:
 
         candidates = generate_candidate_moments(segments)
         classifier = self._providers["classification"]
+        fallback_classifier = NullClassificationProvider()
         drafts: list[MediaMomentDraft] = []
 
         for i, candidate in enumerate(candidates):
-            classification = await classifier.classify_moment(
-                MomentClassificationInput(
-                    transcript_text=candidate.transcript_text,
-                    neighboring_context="",
-                    visual_description="",
-                    start_ms=candidate.start_ms,
-                    end_ms=candidate.end_ms,
-                    asset_title=asset_title,
-                    language=None,
-                )
+            classification_input = MomentClassificationInput(
+                transcript_text=candidate.transcript_text,
+                neighboring_context="",
+                visual_description="",
+                start_ms=candidate.start_ms,
+                end_ms=candidate.end_ms,
+                asset_title=asset_title,
+                language=None,
             )
+            try:
+                classification = await classifier.classify_moment(classification_input)
+            except Exception as exc:
+                logger.warning(
+                    "provider.classification_failed",
+                    asset_id=asset_id,
+                    error_type=type(exc).__name__,
+                    detail=str(exc)[:300],
+                )
+                classification = await fallback_classifier.classify_moment(
+                    classification_input
+                )
             drafts.append(
                 MediaMomentDraft(
                     asset_id=asset_id,
@@ -410,7 +480,7 @@ _SIMULATED_TRANSCRIPT = [
 ]
 
 
-def _simulated_probe() -> dict:
+def _simulated_probe() -> ProbeResult:
     return {
         "duration_ms": 71_000,
         "width": 1920,
@@ -500,7 +570,11 @@ def main() -> None:
     )
     parser.add_argument("--once", action="store_true", help="Drain the queue once and exit.")
     parser.add_argument("--interval", type=float, default=POLL_INTERVAL_SECONDS)
-    raise SystemExit(asyncio.run(_main(parser.parse_args())))
+    try:
+        exit_code = asyncio.run(_main(parser.parse_args()))
+    except KeyboardInterrupt:
+        exit_code = 0
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

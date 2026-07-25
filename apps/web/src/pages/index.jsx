@@ -263,7 +263,9 @@ export const LibraryPage = () => {
               ? {
                   ...mappedAsset,
                   previewUrl: localPreview.url,
+                  thumbnailUrl: null,
                   mediaType: localPreview.mediaType,
+                  previewSource: "Local preview · available this session",
                 }
               : mappedAsset;
           }),
@@ -761,7 +763,9 @@ export const AssetPage = () => {
         ...(localPreview
           ? {
               previewUrl: localPreview.url,
+              thumbnailUrl: null,
               mediaType: localPreview.mediaType,
+              previewSource: "Local preview · available this session",
             }
           : {}),
         moments: mappedMoments.length,
@@ -883,7 +887,9 @@ export const AssetPage = () => {
                     <audio src={asset.previewUrl} controls aria-label={`Preview of ${asset.name}`} />
                   </div>
                 )}
-                <span className="local-preview-note">Local preview · available this session</span>
+                <span className="local-preview-note">
+                  {asset.previewSource ?? "Stored locally"}
+                </span>
               </>
             ) : (
               <>

@@ -37,26 +37,30 @@ export const createApiClient = ({
   }
 
   const request = async (path, options = {}) => {
+    const { timeoutMs: requestTimeoutMs = timeoutMs, ...fetchOptions } = options;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
     const token = await getAccessToken();
     const headers = new Headers(options.headers);
+    const body = options.body;
+    const isRawBody =
+      body instanceof FormData ||
+      body instanceof Blob ||
+      body instanceof ArrayBuffer ||
+      ArrayBuffer.isView(body);
 
     headers.set("Accept", "application/json");
-    if (options.body && !(options.body instanceof FormData)) {
+    if (body && !isRawBody) {
       headers.set("Content-Type", "application/json");
     }
     if (token) headers.set("Authorization", `Bearer ${token}`);
 
     try {
       const response = await fetchImpl(`${baseUrl}${path}`, {
-        ...options,
+        ...fetchOptions,
         headers,
         signal: controller.signal,
-        body:
-          options.body && !(options.body instanceof FormData)
-            ? JSON.stringify(options.body)
-            : options.body,
+        body: body && !isRawBody ? JSON.stringify(body) : body,
       });
 
       const contentType = response.headers.get("content-type") ?? "";
@@ -107,6 +111,13 @@ export const createApiClient = ({
     },
     uploads: {
       initiate: (input) => request("/uploads/initiate", { method: "POST", body: input }),
+      uploadContent: (uploadId, file) =>
+        request(`/uploads/${uploadId}/content`, {
+          method: "PUT",
+          body: file,
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          timeoutMs: 30 * 60 * 1_000,
+        }),
       complete: (uploadId, input) =>
         request(`/uploads/${uploadId}/complete`, { method: "POST", body: input }),
       abort: (uploadId) => request(`/uploads/${uploadId}/abort`, { method: "POST" }),

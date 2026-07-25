@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -180,7 +181,7 @@ class GoogleDriveOAuth:
         await self._http.aclose()
 
 
-def _parse_token_response(response: httpx.Response) -> dict:
+def _parse_token_response(response: httpx.Response) -> dict[str, Any]:
     if response.status_code >= 400:
         # Google returns the reason in the body; the body never contains the
         # client secret, but it can echo the code, so only the error field is
@@ -191,7 +192,7 @@ def _parse_token_response(response: httpx.Response) -> dict:
             detail = "unparseable_error_response"
         raise OAuthError(f"Google token endpoint returned {response.status_code}: {detail}")
 
-    payload = response.json()
+    payload = cast(dict[str, Any], response.json())
     if "access_token" not in payload:
         raise OAuthError("Google token response did not include an access token.")
     return payload

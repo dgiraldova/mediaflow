@@ -24,13 +24,13 @@ from worker.repositories.interfaces import (
     SourceConnectionRepository,
     TranscriptRepository,
 )
-from worker.storage.r2_client import R2Client
+from worker.storage.interfaces import StorageClient
 
 
 @dataclass
 class ActivityDependencies:
     settings: WorkerSettings
-    storage: R2Client
+    storage: StorageClient
     asset_repository: AssetRepository
     processing_job_repository: ProcessingJobRepository
     transcript_repository: TranscriptRepository

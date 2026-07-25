@@ -8,13 +8,15 @@ root for the full documented list of variables.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class TemporalSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TEMPORAL_", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="TEMPORAL_", extra="ignore")
 
     host: str = "localhost:7233"
     namespace: str = "default"
@@ -26,7 +28,7 @@ class TemporalSettings(BaseSettings):
 class StorageSettings(BaseSettings):
     """Cloudflare R2 (S3-compatible) configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="R2_", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="R2_", extra="ignore")
 
     account_id: str = ""
     access_key_id: str = ""
@@ -47,7 +49,11 @@ class StorageSettings(BaseSettings):
 
 
 class TranscriptionSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TRANSCRIPTION_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="TRANSCRIPTION_",
+        extra="ignore",
+    )
 
     provider: str = "openai"
     api_key: str = ""
@@ -56,7 +62,7 @@ class TranscriptionSettings(BaseSettings):
 
 
 class TwelveLabsSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="TWELVE_LABS_", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="TWELVE_LABS_", extra="ignore")
 
     api_key: str = ""
     base_url: str = "https://api.twelvelabs.io/v1.3"
@@ -64,7 +70,7 @@ class TwelveLabsSettings(BaseSettings):
 
 
 class OpenAISettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OPENAI_", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="OPENAI_", extra="ignore")
 
     api_key: str = ""
     base_url: str | None = None
@@ -81,7 +87,11 @@ class ApiSettings(BaseSettings):
     pipeline still runs standalone.
     """
 
-    model_config = SettingsConfigDict(env_prefix="MEDIAFLOW_API_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="MEDIAFLOW_API_",
+        extra="ignore",
+    )
 
     base_url: str = "http://127.0.0.1:3000"
     internal_token: str = ""
@@ -89,7 +99,11 @@ class ApiSettings(BaseSettings):
 
 
 class GoogleDriveSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GOOGLE_DRIVE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="GOOGLE_DRIVE_",
+        extra="ignore",
+    )
 
     client_id: str = ""
     client_secret: str = ""
@@ -112,6 +126,9 @@ class WorkerSettings(BaseSettings):
     max_upload_bytes: int = 20 * 1024 * 1024 * 1024  # 20 GiB
     analysis_version: str = "2026-07-25.1"
     embedding_batch_size: int = 32
+    storage_backend: Literal["local", "r2"] = "local"
+    local_storage_path: str = str(Path(__file__).resolve().parents[3] / "var" / "media")
+    local_media_base_url: str = "http://127.0.0.1:3000/api/v1/media"
 
     temporal: TemporalSettings = Field(default_factory=TemporalSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)

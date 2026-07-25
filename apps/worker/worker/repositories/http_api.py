@@ -20,10 +20,12 @@ lives in ``api_mapping``.
 
 from __future__ import annotations
 
+from typing import cast
+
 import httpx
 
 from worker.domain.enums import AssetStatus, MediaType, Orientation, ProcessingStage
-from worker.domain.models import Asset, MediaMomentDraft, TranscriptSegmentDraft
+from worker.domain.models import Asset, MediaMomentDraft, ProcessingJob, TranscriptSegmentDraft
 from worker.logging import get_logger
 from worker.repositories.api_mapping import (
     WORKER_STATUS_TO_API,
@@ -55,7 +57,13 @@ class ApiClient:
         self._client = client
 
     @classmethod
-    def from_settings(cls, *, base_url: str, internal_token: str, timeout: float = 30.0):
+    def from_settings(
+        cls,
+        *,
+        base_url: str,
+        internal_token: str,
+        timeout: float = 30.0,
+    ) -> ApiClient:
         client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"X-Internal-Token": internal_token},
@@ -79,26 +87,38 @@ class ApiClient:
         jobs: list[dict[str, object]] = response.json().get("jobs", [])
         return jobs
 
-    async def patch_processing(self, asset_id: str, payload: dict[str, object]) -> dict:
+    async def patch_processing(
+        self,
+        asset_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
         response = await self._client.patch(
             f"/api/v1/internal/assets/{asset_id}/processing", json=payload
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, object], response.json())
 
-    async def put_transcript(self, asset_id: str, payload: dict[str, object]) -> dict:
+    async def put_transcript(
+        self,
+        asset_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
         response = await self._client.put(
             f"/api/v1/internal/assets/{asset_id}/transcript", json=payload
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, object], response.json())
 
-    async def put_moments(self, asset_id: str, payload: dict[str, object]) -> dict:
+    async def put_moments(
+        self,
+        asset_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
         response = await self._client.put(
             f"/api/v1/internal/assets/{asset_id}/moments", json=payload
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, object], response.json())
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -261,7 +281,7 @@ class HttpProcessingJobRepository:
         self._api = api
         self._state = state or _ProcessingState()
 
-    async def get(self, *, organization_id: str, job_id: str):
+    async def get(self, *, organization_id: str, job_id: str) -> ProcessingJob:
         raise NotImplementedError(
             "Processing jobs are addressed by asset id through Member B's API; "
             "the worker never needs to fetch one by job id."
@@ -324,7 +344,8 @@ class HttpTranscriptRepository:
     ) -> int:
         wire = transcript_segments_to_wire(segments)
         result = await self._api.put_transcript(asset_id, {"segments": wire})
-        count = int(result.get("count", len(wire)))
+        raw_count = result.get("count", len(wire))
+        count = raw_count if isinstance(raw_count, int) else int(str(raw_count))
         logger.info("transcript.persisted", asset_id=asset_id, count=count)
         return count
 
@@ -343,7 +364,8 @@ class HttpMomentRepository:
     ) -> int:
         wire = moments_to_wire(moments)
         result = await self._api.put_moments(asset_id, {"moments": wire})
-        count = int(result.get("count", len(wire)))
+        raw_count = result.get("count", len(wire))
+        count = raw_count if isinstance(raw_count, int) else int(str(raw_count))
         logger.info("moments.persisted", asset_id=asset_id, count=count)
         return count
 

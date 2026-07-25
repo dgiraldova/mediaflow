@@ -183,6 +183,11 @@ describe("MediaFlow frontend", () => {
       upload_key: "organizations/demo-org/assets/asset-uploaded/new-story.mp4",
       status: "uploading",
     });
+    vi.spyOn(api.uploads, "uploadContent").mockResolvedValue({
+      asset_id: "asset-uploaded",
+      upload_id: "upload-live",
+      byte_size: 5,
+    });
     vi.spyOn(api.uploads, "complete").mockResolvedValue({
       asset_id: "asset-uploaded",
       upload_id: "upload-live",
@@ -201,12 +206,13 @@ describe("MediaFlow frontend", () => {
     await user.type(nameInput, "customer-kickoff.mp4");
     await user.click(screen.getByRole("button", { name: "Start upload" }));
 
-    expect(await screen.findByText("Upload registered — analysis queued")).toBeInTheDocument();
+    expect(await screen.findByText("Stored locally — analysis queued")).toBeInTheDocument();
     expect(api.uploads.initiate).toHaveBeenCalledWith({
       organization_id: "demo-org",
       original_filename: "customer-kickoff.mp4",
       media_type: "video",
     });
+    expect(api.uploads.uploadContent).toHaveBeenCalledWith("upload-live", file);
     expect(api.uploads.complete).toHaveBeenCalledWith("upload-live", {
       byte_size: file.size,
     });

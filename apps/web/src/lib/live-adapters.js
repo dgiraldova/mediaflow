@@ -52,6 +52,9 @@ export const toAssetViewModel = (asset, index = 0) => ({
   width: asset.width,
   height: asset.height,
   error: asset.error_message,
+  previewUrl: asset.playback_url ?? asset.preview_url ?? null,
+  thumbnailUrl: asset.thumbnail_url ?? null,
+  previewSource: asset.preview_url ? "Stored locally" : null,
   description:
     asset.status === "ready"
       ? "This asset is indexed and ready for transcript and moment discovery."

@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import os
 import shutil
+from dataclasses import replace
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -59,7 +60,10 @@ from worker.media.ffmpeg import generate_thumbnails as ffmpeg_generate_thumbnail
 from worker.media.ffprobe import inspect_media as ffprobe_inspect_media
 from worker.media.validation import UnsupportedMediaError, validate_media_file
 from worker.moments.segmentation import generate_candidate_moments
-from worker.providers.classification import MomentClassificationInput
+from worker.providers.classification import (
+    MomentClassificationInput,
+    NullClassificationProvider,
+)
 from worker.storage.keys import StorageKeyKind, build_storage_key
 
 logger = get_logger(__name__)
@@ -355,9 +359,18 @@ class IngestionActivities:
 
     @activity.defn(name="transcribe_audio")
     async def transcribe_audio(self, args: TranscribeAudioInput) -> TranscribeAudioResult:
-        segments = await self._deps.transcription_provider.transcribe(
-            audio_path=args.local_audio_path, language_hint=args.language_hint
-        )
+        try:
+            segments = await self._deps.transcription_provider.transcribe(
+                audio_path=args.local_audio_path, language_hint=args.language_hint
+            )
+        except Exception as exc:
+            logger.warning(
+                "provider.transcription_failed",
+                asset_id=args.context.asset_id,
+                error_type=type(exc).__name__,
+                detail=str(exc)[:300],
+            )
+            segments = []
 
         payloads = [
             TranscriptSegmentPayload(
@@ -462,6 +475,7 @@ class IngestionActivities:
     @activity.defn(name="classify_moments")
     async def classify_moments(self, args: ClassifyMomentsInput) -> ClassifyMomentsResult:
         drafts: list[MomentDraftPayload] = []
+        fallback_classifier = NullClassificationProvider()
         for sequence_number, candidate in enumerate(args.candidates):
             neighbor_texts = [
                 c.transcript_text
@@ -478,9 +492,20 @@ class IngestionActivities:
                 organization_vocabulary=args.organization_vocabulary,
                 language=args.language,
             )
-            classification = await self._deps.classification_provider.classify_moment(
-                classification_input
-            )
+            try:
+                classification = await self._deps.classification_provider.classify_moment(
+                    classification_input
+                )
+            except Exception as exc:
+                logger.warning(
+                    "provider.classification_failed",
+                    asset_id=args.context.asset_id,
+                    error_type=type(exc).__name__,
+                    detail=str(exc)[:300],
+                )
+                classification = await fallback_classifier.classify_moment(
+                    classification_input
+                )
             drafts.append(
                 MomentDraftPayload(
                     sequence_number=sequence_number,
@@ -516,7 +541,7 @@ class IngestionActivities:
         embeddings = await self._deps.embedding_provider.embed_texts(texts)
 
         updated = [
-            MomentDraftPayload(**{**vars_of(m), "embedding": embedding})
+            replace(m, embedding=embedding)
             for m, embedding in zip(args.moments, embeddings, strict=True)
         ]
         return GenerateTextEmbeddingsResult(moments=updated)
@@ -563,29 +588,6 @@ class IngestionActivities:
     @activity.defn(name="cleanup_temporary_files")
     async def cleanup_temporary_files(self, temp_dir: str) -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def vars_of(payload: MomentDraftPayload) -> dict[str, object]:
-    return {
-        "sequence_number": payload.sequence_number,
-        "start_ms": payload.start_ms,
-        "end_ms": payload.end_ms,
-        "moment_type": payload.moment_type,
-        "title": payload.title,
-        "transcript_text": payload.transcript_text,
-        "visual_description": payload.visual_description,
-        "marketing_description": payload.marketing_description,
-        "content_types": payload.content_types,
-        "topics": payload.topics,
-        "pain_points": payload.pain_points,
-        "benefits": payload.benefits,
-        "funnel_stages": payload.funnel_stages,
-        "people_labels": payload.people_labels,
-        "product_labels": payload.product_labels,
-        "keywords": payload.keywords,
-        "technical_quality_score": payload.technical_quality_score,
-    }
-
 
 def _segment_payload_to_draft(
     payload: TranscriptSegmentPayload,

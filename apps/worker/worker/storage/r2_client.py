@@ -18,16 +18,12 @@ from botocore.client import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from worker.logging import get_logger
+from worker.storage.interfaces import StorageObject
 
 logger = get_logger(__name__)
 
 
-@dataclass(frozen=True)
-class R2Object:
-    key: str
-    byte_size: int
-    etag: str
-    content_type: str | None
+R2Object = StorageObject
 
 
 @dataclass(frozen=True)
@@ -73,10 +69,12 @@ class R2Client:
         self, *, key: str, content_type: str, ttl_seconds: int | None = None
     ) -> str:
         """Single-shot presigned PUT for smaller files."""
-        return self._client.generate_presigned_url(
-            "put_object",
-            Params={"Bucket": self._bucket, "Key": key, "ContentType": content_type},
-            ExpiresIn=ttl_seconds or self._presigned_upload_ttl_seconds,
+        return str(
+            self._client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self._bucket, "Key": key, "ContentType": content_type},
+                ExpiresIn=ttl_seconds or self._presigned_upload_ttl_seconds,
+            )
         )
 
     async def create_multipart_upload(
@@ -93,20 +91,22 @@ class R2Client:
             response = self._client.create_multipart_upload(
                 Bucket=self._bucket, Key=key, ContentType=content_type
             )
-            return response["UploadId"]
+            return str(response["UploadId"])
 
         upload_id = await asyncio.to_thread(_create)
 
         def _presign_part(part_number: int) -> str:
-            return self._client.generate_presigned_url(
-                "upload_part",
-                Params={
-                    "Bucket": self._bucket,
-                    "Key": key,
-                    "UploadId": upload_id,
-                    "PartNumber": part_number,
-                },
-                ExpiresIn=ttl_seconds or self._presigned_upload_ttl_seconds,
+            return str(
+                self._client.generate_presigned_url(
+                    "upload_part",
+                    Params={
+                        "Bucket": self._bucket,
+                        "Key": key,
+                        "UploadId": upload_id,
+                        "PartNumber": part_number,
+                    },
+                    ExpiresIn=ttl_seconds or self._presigned_upload_ttl_seconds,
+                )
             )
 
         parts = [
@@ -141,10 +141,12 @@ class R2Client:
     # -- Signed access ------------------------------------------------------
 
     def generate_signed_get_url(self, *, key: str, ttl_seconds: int | None = None) -> str:
-        return self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self._bucket, "Key": key},
-            ExpiresIn=ttl_seconds or self._signed_url_ttl_seconds,
+        return str(
+            self._client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": key},
+                ExpiresIn=ttl_seconds or self._signed_url_ttl_seconds,
+            )
         )
 
     # -- Worker-side object access -------------------------------------------

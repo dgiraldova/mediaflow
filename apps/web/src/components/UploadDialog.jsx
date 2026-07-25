@@ -105,7 +105,9 @@ export const UploadDialog = ({
         setUploadSession(session);
       }
 
-      setProgress(65);
+      setProgress(35);
+      await api.uploads.uploadContent(session.upload_id, file);
+      setProgress(85);
       const completedUpload = await api.uploads.complete(session.upload_id, {
         byte_size: file.size,
       });
@@ -220,10 +222,10 @@ export const UploadDialog = ({
                 <span>
                   {complete
                     ? liveApi
-                      ? "Upload registered — analysis queued"
+                      ? "Stored locally — analysis queued"
                       : "Upload complete — ready for analysis"
                     : busy
-                      ? "Registering with MediaFlow..."
+                      ? "Saving to your local MediaFlow library..."
                       : "Ready to upload"}
                 </span>
                 <div className="progress-track" aria-label={`Upload ${progress}% complete`}>
@@ -243,7 +245,7 @@ export const UploadDialog = ({
 
         <div className="dialog-note">
           {liveApi
-            ? "The live API registers this file and queues it for analysis using its secure storage key."
+            ? "The file is stored on this computer, then queued automatically for analysis."
             : "Media uploads directly to secure object storage. It never passes through the web server."}
         </div>
 

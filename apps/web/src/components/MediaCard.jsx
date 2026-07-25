@@ -6,7 +6,7 @@ export const MediaArtwork = ({ asset, className = "" }) => (
   <div
     className={`media-artwork artwork-${asset.visual ?? "portrait"} ${
       asset.previewUrl ? "has-media-preview" : ""
-    } ${className}`}
+    } ${asset.thumbnailUrl ? "has-media-preview" : ""} ${className}`}
     style={{
       "--art-color-a": asset.colors?.[0] ?? "#d9d2c4",
       "--art-color-b": asset.colors?.[1] ?? "#364a48",
@@ -14,7 +14,9 @@ export const MediaArtwork = ({ asset, className = "" }) => (
     aria-label={`${asset.name} preview`}
     role="img"
   >
-    {asset.previewUrl && asset.mediaType === "image" ? (
+    {asset.thumbnailUrl ? (
+      <img className="media-preview-image" src={asset.thumbnailUrl} alt="" />
+    ) : asset.previewUrl && asset.mediaType === "image" ? (
       <img className="media-preview-image" src={asset.previewUrl} alt="" />
     ) : asset.previewUrl && asset.mediaType === "video" ? (
       <video

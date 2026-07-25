@@ -67,4 +67,28 @@ describe("JWT API client", () => {
       "http://localhost:3000/api/v1/assets/asset-live/processing-job",
     );
   });
+
+  it("sends upload bytes without JSON encoding them", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      json: async () => ({ byte_size: 5 }),
+    });
+    const client = createApiClient({
+      baseUrl: "http://localhost:3000/api/v1",
+      getAccessToken: () => "signed.jwt",
+      fetchImpl,
+    });
+    const file = new File(["media"], "story.mp4", { type: "video/mp4" });
+
+    await client.uploads.uploadContent("upload-live", file);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://localhost:3000/api/v1/uploads/upload-live/content",
+      expect.objectContaining({ method: "PUT", body: file }),
+    );
+    const requestOptions = fetchImpl.mock.calls[0][1];
+    expect(requestOptions.headers.get("Content-Type")).toBe("video/mp4");
+  });
 });

@@ -45,6 +45,7 @@ def api_app(tmp_path):
         internal_worker_token=INTERNAL_TOKEN,
         jwt_secret="test-secret",
         media_base_url="http://127.0.0.1:8001",
+        media_storage_path=str(tmp_path / "media"),
     )
 
 
@@ -97,8 +98,15 @@ async def create_asset(user_client: httpx.AsyncClient) -> str:
     )
     initiated.raise_for_status()
     body = initiated.json()
+    content = b"founder-interview"
+    stored = await user_client.put(
+        f"/api/v1/uploads/{body['upload_id']}/content",
+        content=content,
+        headers={"Content-Type": "video/mp4"},
+    )
+    stored.raise_for_status()
     completed = await user_client.post(
-        f"/api/v1/uploads/{body['upload_id']}/complete", json={"byte_size": 5_242_880}
+        f"/api/v1/uploads/{body['upload_id']}/complete", json={"byte_size": len(content)}
     )
     completed.raise_for_status()
     return body["asset_id"]
@@ -193,20 +201,29 @@ async def test_processing_updates_move_asset_to_ready(clients, repos):
 
 
 @pytest.mark.asyncio
-async def test_proxy_key_makes_playback_url_available(clients, repos):
+async def test_proxy_key_makes_playback_url_available(clients, repos, tmp_path):
     _, user_client = clients
     asset_id = await create_asset(user_client)
 
-    # Before the worker reports a proxy, playback is unavailable.
+    # The stored original is immediately previewable while processing.
     early = await user_client.get(f"/api/v1/assets/{asset_id}/playback-url")
-    assert early.status_code == 409
+    assert early.status_code == 200
+    assert "/organizations/" in early.json()["url"]
 
+    proxy_key = f"orgs/{ORG}/assets/{asset_id}/proxy/proxy.mp4"
     await repos["asset"].update_storage_keys(
         organization_id=ORG,
         asset_id=asset_id,
-        proxy_storage_key=f"orgs/{ORG}/assets/{asset_id}/proxy/proxy.mp4",
+        proxy_storage_key=proxy_key,
     )
 
+    # A missing proxy must not break playback while the original still exists.
+    fallback = await user_client.get(f"/api/v1/assets/{asset_id}/playback-url")
+    assert fallback.json()["url"] == early.json()["url"]
+
+    proxy_path = tmp_path / "media" / proxy_key
+    proxy_path.parent.mkdir(parents=True, exist_ok=True)
+    proxy_path.write_bytes(b"playable-proxy")
     playback = await user_client.get(f"/api/v1/assets/{asset_id}/playback-url")
     assert playback.status_code == 200
     assert playback.json()["url"].endswith("proxy/proxy.mp4")

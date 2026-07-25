@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any, cast
 
 import httpx
 
@@ -117,12 +118,17 @@ class DriveClient:
         logger.info("google_drive.downloaded", file_id=file_id, byte_size=written)
         return written
 
-    async def _paginate(self, *, query: str, fields: str) -> AsyncIterator[dict]:
+    async def _paginate(
+        self,
+        *,
+        query: str,
+        fields: str,
+    ) -> AsyncIterator[dict[str, Any]]:
         page_token: str | None = None
         while True:
-            params = {
+            params: dict[str, str] = {
                 "q": query,
-                "pageSize": PAGE_SIZE,
+                "pageSize": str(PAGE_SIZE),
                 "fields": f"nextPageToken,files({fields})",
                 # Required for files in shared drives to appear at all.
                 "supportsAllDrives": "true",
@@ -139,7 +145,7 @@ class DriveClient:
                     f"Drive list failed: HTTP {response.status_code} {response.text[:200]}"
                 )
 
-            payload = response.json()
+            payload = cast(dict[str, Any], response.json())
             for item in payload.get("files", []):
                 yield item
 
@@ -151,7 +157,7 @@ class DriveClient:
         await self._http.aclose()
 
 
-def _to_drive_file(item: dict) -> DriveFile:
+def _to_drive_file(item: dict[str, Any]) -> DriveFile:
     metadata = item.get("videoMediaMetadata") or {}
     duration = metadata.get("durationMillis")
     return DriveFile(

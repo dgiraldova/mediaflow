@@ -8,29 +8,26 @@ Architecture documentation lives in
 
 ## Local development
 
-### With Docker (recommended)
+### Local disk (current default)
 
-Brings up Temporal, MinIO (local R2) and the worker with FFmpeg preinstalled:
-
-```bash
-docker compose -f infrastructure/docker/media/docker-compose.media.yml up --build
-```
-
-Temporal Web UI: <http://localhost:8233> · MinIO console: <http://localhost:9001>
-
-### Without Docker
-
-Requires Python 3.12+ and FFmpeg on `PATH`.
+The API and worker share `var/media`; neither MinIO nor Cloudflare is needed.
+From the repository root:
 
 ```bash
-cd apps/worker && uv venv .venv && uv pip install --python .venv/bin/python -e ".[dev]"
+WORKER_STORAGE_BACKEND=local \
+MEDIAFLOW_API_INTERNAL_TOKEN=change-me-before-sharing \
+PYTHONPATH=apps/worker .venv/bin/python -m worker.poller
 ```
 
-Then start Temporal and MinIO from the compose file above and run:
+The poller automatically claims each completed upload. FFmpeg and FFprobe must
+be installed on the host for real video processing. From the repository root,
+`corepack pnpm tools:ffmpeg` installs workspace-local binaries without sudo;
+the root `dev:worker` command automatically adds them to `PATH`.
 
-```bash
-python -m worker.main
-```
+### Cloudflare R2 later
+
+Set `WORKER_STORAGE_BACKEND=r2` and the `R2_*` variables. The same worker
+pipeline then uses the existing S3-compatible adapter.
 
 ## Checks
 
@@ -59,7 +56,7 @@ repository root. No secret is ever read from a file in source control.
 |---|---|
 | `WORKER_` | Runtime: log level, temp dir, analysis version, upload limits |
 | `TEMPORAL_` | Temporal host, namespace, task queue, TLS/API key |
-| `R2_` | Cloudflare R2 endpoint, credentials, bucket, signed-URL TTLs |
+| `R2_` | Optional Cloudflare R2 endpoint, credentials, bucket, signed-URL TTLs |
 | `TRANSCRIPTION_` | Transcription provider endpoint, key and model |
 | `TWELVE_LABS_` | Twelve Labs API key and index id |
 | `OPENAI_` | Classification and embedding models |
@@ -67,28 +64,24 @@ repository root. No secret is ever read from a file in source control.
 
 **Provider keys are optional.** When one is absent, the worker wires a `Null`
 adapter for that provider, so the full pipeline runs offline without spending
-API credits. Production deployments must set them all.
+API credits. When `TRANSCRIPTION_API_KEY` is blank, the worker reuses
+`OPENAI_API_KEY` for transcription. Production deployments must configure the
+providers they intend to use.
 
 ## Running the full demo
 
 Three processes. From the repository root:
 
-**1. Member B's API**
+**1. API**
 
 ```bash
-MEDIAFLOW_INTERNAL_WORKER_TOKEN=dev-token MEDIAFLOW_MEDIA_BASE_URL=http://127.0.0.1:8001 python -m uvicorn app.main:create_app --factory --port 3000
+MEDIAFLOW_INTERNAL_WORKER_TOKEN=dev-token .venv/bin/python -m uvicorn app.main:app --port 3000
 ```
 
 **2. The ingestion poller** — claims queued uploads and processes them
 
 ```bash
-cd apps/worker && MEDIAFLOW_API_BASE_URL=http://127.0.0.1:3000 MEDIAFLOW_API_INTERNAL_TOKEN=dev-token .venv/Scripts/python -m worker.poller --simulate
-```
-
-**3. The media server** — only needed for actual video playback
-
-```bash
-cd apps/worker && .venv/Scripts/python -m worker.media_server
+PYTHONPATH=apps/worker MEDIAFLOW_API_BASE_URL=http://127.0.0.1:3000 MEDIAFLOW_API_INTERNAL_TOKEN=dev-token .venv/bin/python -m worker.poller
 ```
 
 Upload through the UI and the asset moves `processing` → `ready` on its own,
@@ -96,14 +89,13 @@ with transcript, moments, search results and a playback URL.
 
 ### `--simulate`
 
-Without it the poller downloads the uploaded file from R2/MinIO and runs real
-FFprobe, FFmpeg and AI providers — that needs storage configured and FFmpeg on
+Without it the poller reads the uploaded local file and runs real FFprobe,
+FFmpeg and configured AI providers — that needs FFmpeg on
 `PATH`. With it, **no media is processed**: metadata, transcripts and moments
 are synthetic placeholders so the UI flow can be demonstrated before storage
 exists. It logs a warning on every start; never run it in production.
 
-Drop `--simulate` and set the `R2_*` variables once MinIO is running
-(`docker compose -f infrastructure/docker/media/docker-compose.media.yml up`).
+Use `--simulate` only for UI demonstrations.
 
 ## Integration with Member B's API
 
@@ -134,15 +126,9 @@ upsert-by-id endpoint.
 
 ### Media delivery
 
-Member B builds playback URLs as `MEDIAFLOW_MEDIA_BASE_URL/{proxy_key}`. In
-local development that is this worker's media server:
-
-```bash
-cd apps/worker && .venv/Scripts/python -m worker.media_server
-```
-
-It streams proxies and thumbnails from R2/MinIO on `127.0.0.1:8001` with HTTP
-Range support so the player can seek, and refuses to serve original media.
+The API serves the worker's proxies and thumbnails directly from the shared
+local storage root. The standalone media server remains available for an R2
+deployment.
 
 ### End-to-end demo
 

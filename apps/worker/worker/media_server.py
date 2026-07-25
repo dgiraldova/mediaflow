@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 
 from worker.config import WorkerSettings, get_settings
 from worker.logging import configure_logging, get_logger
-from worker.storage.r2_client import R2Client
+from worker.storage.factory import build_storage
+from worker.storage.interfaces import StorageClient, StorageObject
 
 logger = get_logger(__name__)
 
@@ -81,15 +82,12 @@ def content_type_for(key: str) -> str:
     return CONTENT_TYPES.get(key[dot:].lower(), DEFAULT_CONTENT_TYPE)
 
 
-def create_app(settings: WorkerSettings | None = None, storage: R2Client | None = None) -> FastAPI:
+def create_app(
+    settings: WorkerSettings | None = None,
+    storage: StorageClient | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
-    storage = storage or R2Client(
-        bucket=settings.storage.bucket,
-        endpoint_url=settings.storage.resolved_endpoint_url,
-        access_key_id=settings.storage.access_key_id,
-        secret_access_key=settings.storage.secret_access_key,
-        region=settings.storage.region,
-    )
+    storage = storage or build_storage(settings)
 
     app = FastAPI(title="MediaFlow media delivery", version="0.1.0")
 
@@ -105,7 +103,7 @@ def create_app(settings: WorkerSettings | None = None, storage: R2Client | None 
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "bucket": settings.storage.bucket}
+        return {"status": "ok", "storage": settings.storage_backend}
 
     @app.post("/uploads/presign")
     async def presign_upload(payload: PresignRequest, request: Request) -> PresignResponse:
@@ -201,7 +199,7 @@ def create_app(settings: WorkerSettings | None = None, storage: R2Client | None 
     return app
 
 
-async def _lookup(storage: R2Client, key: str):
+async def _lookup(storage: StorageClient, key: str) -> StorageObject:
     if not SERVABLE_KEY_PATTERN.match(key):
         # Do not reveal whether a non-servable key exists.
         raise HTTPException(status_code=404, detail="Not found")
@@ -216,7 +214,7 @@ def main() -> None:
 
     settings = get_settings()
     configure_logging(settings.log_level)
-    logger.info("media_server.starting", bucket=settings.storage.bucket)
+    logger.info("media_server.starting", storage=settings.storage_backend)
     uvicorn.run(create_app(settings), host="127.0.0.1", port=8001)
 
 

@@ -42,6 +42,7 @@ def api_app(tmp_path):
         internal_worker_token=TOKEN,
         jwt_secret="test-secret",
         media_base_url="http://127.0.0.1:8001",
+        media_storage_path=str(tmp_path / "media"),
     )
 
 
@@ -89,8 +90,15 @@ async def upload(user: httpx.AsyncClient, filename: str = "interview.mp4") -> st
             },
         )
     ).json()
+    content = filename.encode()
+    stored = await user.put(
+        f"/api/v1/uploads/{initiated['upload_id']}/content",
+        content=content,
+        headers={"Content-Type": "video/mp4"},
+    )
+    stored.raise_for_status()
     await user.post(
-        f"/api/v1/uploads/{initiated['upload_id']}/complete", json={"byte_size": 5_000_000}
+        f"/api/v1/uploads/{initiated['upload_id']}/complete", json={"byte_size": len(content)}
     )
     return initiated["asset_id"]
 

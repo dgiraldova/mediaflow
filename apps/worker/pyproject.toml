@@ -40,6 +40,7 @@ ignore = ["ASYNC230", "ASYNC240"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

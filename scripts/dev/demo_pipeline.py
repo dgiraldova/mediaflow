@@ -83,11 +83,13 @@ class Step:
 
 
 async def main() -> int:
+    demo_media = b"mediaflow-local-upload-demo"
     api_app = create_app(
         database_url="sqlite:///./demo-pipeline.db",
         internal_worker_token=TOKEN,
         jwt_secret="demo-secret",
         media_base_url="http://127.0.0.1:8001",
+        media_storage_path="./var/demo-pipeline-media",
     )
 
     transport = httpx.ASGITransport(app=api_app)
@@ -117,9 +119,15 @@ async def main() -> int:
                 )
             ).json()
             asset_id = initiated["asset_id"]
+            uploaded = await user_http.put(
+                initiated["upload_url"],
+                content=demo_media,
+                headers={"Content-Type": "video/mp4"},
+            )
+            uploaded.raise_for_status()
             await user_http.post(
                 f"/api/v1/uploads/{initiated['upload_id']}/complete",
-                json={"byte_size": 184_320_000},
+                json={"byte_size": len(demo_media)},
             )
             asset = (await user_http.get(f"/api/v1/assets/{asset_id}")).json()
             Step.ok(f"asset {asset_id[:8]}… created, status={asset['status']}")

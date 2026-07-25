@@ -37,13 +37,19 @@ from worker.providers.transcription import (
 )
 from worker.providers.video_intelligence import NullVideoIntelligenceProvider, TwelveLabsProvider
 from worker.repositories.http_api import build_http_repositories
+from worker.repositories.interfaces import (
+    AssetRepository,
+    MomentRepository,
+    ProcessingJobRepository,
+    TranscriptRepository,
+)
 from worker.repositories.memory import (
     InMemoryAssetRepository,
     InMemoryMomentRepository,
     InMemoryProcessingJobRepository,
     InMemoryTranscriptRepository,
 )
-from worker.storage.r2_client import R2Client
+from worker.storage.factory import build_storage
 from worker.workflows.export_clip import ExportClipWorkflow
 from worker.workflows.ingest_asset import IngestAssetWorkflow
 
@@ -51,23 +57,16 @@ logger = get_logger(__name__)
 
 
 def build_dependencies(settings: WorkerSettings) -> ActivityDependencies:
-    storage = R2Client(
-        bucket=settings.storage.bucket,
-        endpoint_url=settings.storage.resolved_endpoint_url,
-        access_key_id=settings.storage.access_key_id,
-        secret_access_key=settings.storage.secret_access_key,
-        region=settings.storage.region,
-        signed_url_ttl_seconds=settings.storage.signed_url_ttl_seconds,
-        presigned_upload_ttl_seconds=settings.storage.presigned_upload_ttl_seconds,
-    )
+    storage = build_storage(settings)
 
+    transcription_api_key = settings.transcription.api_key or settings.openai.api_key
     transcription_provider = (
         OpenAICompatibleTranscriptionProvider(
-            api_key=settings.transcription.api_key,
+            api_key=transcription_api_key,
             model=settings.transcription.model,
-            base_url=settings.transcription.base_url,
+            base_url=settings.transcription.base_url or settings.openai.base_url,
         )
-        if settings.transcription.api_key
+        if transcription_api_key
         else NullTranscriptionProvider()
     )
 
@@ -106,6 +105,10 @@ def build_dependencies(settings: WorkerSettings) -> ActivityDependencies:
     # Persist through Member B's API when an internal token is configured;
     # otherwise fall back to in-memory repositories so the pipeline still runs
     # standalone for local experimentation.
+    asset_repo: AssetRepository
+    job_repo: ProcessingJobRepository
+    transcript_repo: TranscriptRepository
+    moment_repo: MomentRepository
     if settings.api.internal_token:
         _, asset_repo, job_repo, transcript_repo, moment_repo = build_http_repositories(
             base_url=settings.api.base_url,

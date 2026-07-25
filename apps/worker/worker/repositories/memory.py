@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
-from worker.domain.enums import AssetStatus, ProcessingStage
+from worker.domain.enums import AssetStatus, Orientation, ProcessingStage
 from worker.domain.models import (
     Asset,
     ClipExportRequest,
@@ -67,7 +67,7 @@ class InMemoryAssetRepository:
                 duration_ms=duration_ms,
                 width=width,
                 height=height,
-                orientation=orientation,
+                orientation=Orientation(orientation),
                 checksum_sha256=checksum_sha256,
             )
             self._assets[asset_id] = updated

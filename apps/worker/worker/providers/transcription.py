@@ -8,7 +8,7 @@ AGENTS.md rule "never call AI providers directly").
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from openai import AsyncOpenAI
 
@@ -56,31 +56,39 @@ class OpenAICompatibleTranscriptionProvider:
         language_hint: str | None = None,
     ) -> list[TranscriptSegmentResult]:
         with open(audio_path, "rb") as audio_file:
-            response = await self._client.audio.transcriptions.create(
-                model=self._model,
-                file=audio_file,
-                language=language_hint,
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-            )
+            request: dict[str, Any] = {
+                "model": self._model,
+                "file": audio_file,
+                "response_format": "verbose_json",
+                "timestamp_granularities": ["segment"],
+            }
+            if language_hint:
+                request["language"] = language_hint
+            response: Any = await self._client.audio.transcriptions.create(**request)
 
         segments = getattr(response, "segments", None) or []
         results: list[TranscriptSegmentResult] = []
         for segment in segments:
-            start_ms = int(round(_get(segment, "start", 0.0) * 1000))
-            end_ms = int(round(_get(segment, "end", 0.0) * 1000))
+            start_ms = int(round(float(_get(segment, "start", 0.0)) * 1000))
+            end_ms = int(round(float(_get(segment, "end", 0.0)) * 1000))
             text = str(_get(segment, "text", "")).strip()
             if not text:
                 continue
             avg_logprob = _get(segment, "avg_logprob", None)
-            confidence = _confidence_from_logprob(avg_logprob) if avg_logprob is not None else None
+            confidence = (
+                _confidence_from_logprob(float(avg_logprob))
+                if avg_logprob is not None
+                else None
+            )
+            response_language = getattr(response, "language", None)
             results.append(
                 TranscriptSegmentResult(
                     start_ms=start_ms,
                     end_ms=end_ms,
                     text=text,
                     speaker_label=None,
-                    language=language_hint or getattr(response, "language", None),
+                    language=language_hint
+                    or (str(response_language) if response_language else None),
                     confidence=confidence,
                 )
             )
@@ -107,7 +115,7 @@ class NullTranscriptionProvider:
         return []
 
 
-def _get(obj: object, key: str, default: object) -> object:
+def _get(obj: object, key: str, default: Any) -> Any:
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)

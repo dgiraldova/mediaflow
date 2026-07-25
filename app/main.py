@@ -5,8 +5,10 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import uuid
+from pathlib import Path
 from urllib.parse import quote
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -16,7 +18,7 @@ from typing import Generator
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, delete, func, inspect, select, text
@@ -25,12 +27,18 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="MEDIAFLOW_")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="MEDIAFLOW_",
+        extra="ignore",
+    )
 
     database_url: str = "sqlite:///./mediaflow-demo.db"
     internal_worker_token: str = "change-me-before-sharing"
     jwt_secret: str = "replace-with-a-long-random-local-secret"
-    media_base_url: str | None = None
+    media_base_url: str = "http://127.0.0.1:3000/api/v1/media"
+    media_storage_path: str = "./var/media"
+    max_upload_bytes: int = 10 * 1024 * 1024 * 1024
 
 
 class Base(DeclarativeBase):
@@ -183,7 +191,7 @@ class MembershipOut(BaseModel):
 
 class UploadInitiate(BaseModel):
     organization_id: str
-    original_filename: str = Field(min_length=1, max_length=255)
+    original_filename: str = Field(min_length=1, max_length=255, pattern=r"^[^/\\]+$")
     media_type: str = Field(pattern=r"^(video|image|audio)$")
 
 
@@ -191,7 +199,15 @@ class UploadInitiated(BaseModel):
     asset_id: str
     upload_id: str
     upload_key: str
+    upload_url: str
+    upload_method: str = "PUT"
     status: str
+
+
+class UploadContentStored(BaseModel):
+    asset_id: str
+    upload_id: str
+    byte_size: int
 
 
 class UploadComplete(BaseModel):
@@ -220,6 +236,9 @@ class AssetOut(BaseModel):
     checksum_sha256: str | None
     provider_asset_id: str | None
     error_message: str | None
+    preview_url: str | None = None
+    thumbnail_url: str | None = None
+    playback_url: str | None = None
 
 
 class ProcessingJobOut(BaseModel):
@@ -383,6 +402,7 @@ def create_app(
     internal_worker_token: str | None = None,
     jwt_secret: str | None = None,
     media_base_url: str | None = None,
+    media_storage_path: str | None = None,
 ) -> FastAPI:
     settings = Settings()
     engine = make_engine(database_url or settings.database_url)
@@ -390,9 +410,11 @@ def create_app(
     token = internal_worker_token or settings.internal_worker_token
     signing_secret = jwt_secret or settings.jwt_secret
     configured_media_base_url = media_base_url or settings.media_base_url
+    storage_root = Path(media_storage_path or settings.media_storage_path).expanduser().resolve()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        storage_root.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(engine)
         ensure_demo_schema(engine)
         with session_factory() as db:
@@ -455,6 +477,38 @@ def create_app(
             raise HTTPException(status_code=403, detail="You do not have access to this organization")
         return membership
 
+    def storage_path(key: str) -> Path:
+        if not key or key.startswith("/") or ".." in key.split("/"):
+            raise HTTPException(status_code=422, detail="Storage key must be a safe relative path")
+        target = (storage_root / key).resolve()
+        if storage_root != target and storage_root not in target.parents:
+            raise HTTPException(status_code=422, detail="Storage key escapes the media directory")
+        return target
+
+    def media_url(key: str) -> str:
+        return f"{configured_media_base_url.rstrip('/')}/{quote(key, safe='/')}"
+
+    def asset_output(asset: Asset, db: Session) -> AssetOut:
+        derivative = db.get(AssetDerivative, asset.id)
+        proxy_key = derivative.proxy_key if derivative else None
+        thumbnail_key = derivative.thumbnail_key if derivative else None
+        original_exists = storage_path(asset.upload_key).is_file()
+        proxy_exists = bool(proxy_key and storage_path(proxy_key).is_file())
+        thumbnail_exists = bool(thumbnail_key and storage_path(thumbnail_key).is_file())
+        playable_key = proxy_key if proxy_exists else asset.upload_key if original_exists else None
+        preview_key = (
+            thumbnail_key
+            if thumbnail_exists
+            else playable_key
+        )
+        return AssetOut.model_validate(asset).model_copy(
+            update={
+                "preview_url": media_url(preview_key) if preview_key else None,
+                "thumbnail_url": media_url(thumbnail_key) if thumbnail_exists else None,
+                "playback_url": media_url(playable_key) if playable_key else None,
+            }
+        )
+
     def organization_for_request(organization_id: str | None, user_id: str, db: Session) -> str:
         if organization_id:
             require_membership(organization_id, user_id, db)
@@ -471,6 +525,18 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/v1/media/{key:path}")
+    @app.head("/api/v1/media/{key:path}")
+    def get_local_media(key: str) -> FileResponse:
+        target = storage_path(key)
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="Media not found")
+        return FileResponse(
+            target,
+            media_type=mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+            filename=None,
+        )
 
     @app.post("/api/v1/auth/register", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
     def register(payload: RegisterInput, db: Session = Depends(get_db)) -> SessionOut:
@@ -526,7 +592,66 @@ def create_app(
         job = ProcessingJob(asset_id=asset_id, stage="upload", status="uploading")
         db.add_all([asset, job])
         db.commit()
-        return UploadInitiated(asset_id=asset_id, upload_id=job.id, upload_key=upload_key, status=asset.status)
+        return UploadInitiated(
+            asset_id=asset_id,
+            upload_id=job.id,
+            upload_key=upload_key,
+            upload_url=f"/api/v1/uploads/{job.id}/content",
+            status=asset.status,
+        )
+
+    @app.put("/api/v1/uploads/{upload_id}/content", response_model=UploadContentStored)
+    async def store_upload_content(
+        upload_id: str,
+        request: Request,
+        user_id: str = Depends(current_user),
+        db: Session = Depends(get_db),
+    ) -> UploadContentStored:
+        job = db.get(ProcessingJob, upload_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Upload not found")
+        asset = get_asset_or_404(job.asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        if asset.status != "uploading":
+            raise HTTPException(status_code=409, detail="Upload is not accepting content")
+
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Content-Length must be an integer",
+                ) from exc
+            if declared_size > settings.max_upload_bytes:
+                raise HTTPException(status_code=413, detail="Upload exceeds the local size limit")
+
+        target = storage_path(asset.upload_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.part"
+        byte_size = 0
+        try:
+            with temporary.open("wb") as handle:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    byte_size += len(chunk)
+                    if byte_size > settings.max_upload_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="Upload exceeds the local size limit",
+                        )
+                    handle.write(chunk)
+            if byte_size == 0:
+                raise HTTPException(status_code=400, detail="Upload content is empty")
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        asset.byte_size = byte_size
+        db.commit()
+        return UploadContentStored(asset_id=asset.id, upload_id=job.id, byte_size=byte_size)
 
     @app.post("/api/v1/uploads/{upload_id}/complete", response_model=UploadCompleted)
     def complete_upload(upload_id: str, payload: UploadComplete, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> UploadCompleted:
@@ -537,9 +662,18 @@ def create_app(
         require_membership(asset.organization_id, user_id, db)
         if asset.status != "uploading":
             raise HTTPException(status_code=409, detail="Upload is not awaiting completion")
-        assign_checksum(asset, payload.checksum_sha256, db)
+        target = storage_path(asset.upload_key)
+        if not target.is_file():
+            raise HTTPException(status_code=409, detail="Upload content has not been stored")
+        actual_size = target.stat().st_size
+        if payload.byte_size is not None and payload.byte_size != actual_size:
+            raise HTTPException(status_code=409, detail="Uploaded byte size does not match")
+        actual_checksum = file_checksum(target)
+        if payload.checksum_sha256 and payload.checksum_sha256.lower() != actual_checksum:
+            raise HTTPException(status_code=409, detail="Uploaded checksum does not match")
+        assign_checksum(asset, actual_checksum, db)
         asset.status = "processing"
-        asset.byte_size = payload.byte_size
+        asset.byte_size = actual_size
         job.stage = "queued"
         job.status = "queued"
         job.progress = 0
@@ -555,6 +689,7 @@ def create_app(
         require_membership(asset.organization_id, user_id, db)
         if asset.status != "uploading":
             raise HTTPException(status_code=409, detail="Upload can no longer be aborted")
+        storage_path(asset.upload_key).unlink(missing_ok=True)
         asset.status = "failed"
         asset.error_message = "Upload aborted"
         job.stage = "upload"
@@ -594,15 +729,16 @@ def create_app(
         return IngestionClaimResponse(jobs=jobs)
 
     @app.get("/api/v1/assets", response_model=list[AssetOut])
-    def list_assets(organization_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[Asset]:
+    def list_assets(organization_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[AssetOut]:
         require_membership(organization_id, user_id, db)
-        return list(db.scalars(select(Asset).where(Asset.organization_id == organization_id).order_by(Asset.created_at.desc())))
+        assets = list(db.scalars(select(Asset).where(Asset.organization_id == organization_id).order_by(Asset.created_at.desc())))
+        return [asset_output(asset, db) for asset in assets]
 
     @app.get("/api/v1/assets/{asset_id}", response_model=AssetOut)
-    def get_asset(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> Asset:
+    def get_asset(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> AssetOut:
         asset = get_asset_or_404(asset_id, db)
         require_membership(asset.organization_id, user_id, db)
-        return asset
+        return asset_output(asset, db)
 
     @app.get("/api/v1/assets/{asset_id}/transcript", response_model=list[TranscriptOut])
     def get_transcript(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[TranscriptSegment]:
@@ -621,11 +757,14 @@ def create_app(
         asset = get_asset_or_404(asset_id, db)
         require_membership(asset.organization_id, user_id, db)
         derivative = db.get(AssetDerivative, asset_id)
-        if not derivative or not derivative.proxy_key:
-            raise HTTPException(status_code=409, detail="A playable proxy is not available yet")
-        if not configured_media_base_url:
-            raise HTTPException(status_code=503, detail="Media delivery is not configured")
-        return PlaybackUrlOut(url=f"{configured_media_base_url.rstrip('/')}/{quote(derivative.proxy_key)}")
+        proxy_key = derivative.proxy_key if derivative else None
+        if proxy_key and storage_path(proxy_key).is_file():
+            playable_key = proxy_key
+        elif storage_path(asset.upload_key).is_file():
+            playable_key = asset.upload_key
+        else:
+            raise HTTPException(status_code=409, detail="Playable media is not available yet")
+        return PlaybackUrlOut(url=media_url(playable_key))
 
     @app.post("/api/v1/assets/{asset_id}/retry", response_model=ProcessingJobOut)
     def retry_asset(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> ProcessingJob:
@@ -859,6 +998,14 @@ def get_asset_or_404(asset_id: str, db: Session) -> Asset:
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     return asset
+
+
+def file_checksum(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def assign_checksum(asset: Asset, checksum_sha256: str | None, db: Session) -> None:

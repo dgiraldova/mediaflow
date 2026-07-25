@@ -15,6 +15,7 @@ The output is a list of *candidates* — the marketing-classification step
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -59,7 +60,7 @@ class CandidateMoment:
 
 
 def generate_candidate_moments(
-    transcript_segments: list[TranscriptSegmentLike],
+    transcript_segments: Sequence[TranscriptSegmentLike],
     *,
     min_moment_ms: int = MIN_MOMENT_MS,
     preferred_max_ms: int = PREFERRED_MAX_MS,
