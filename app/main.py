@@ -181,6 +181,16 @@ class UploadInitiated(BaseModel):
     status: str
 
 
+class UploadComplete(BaseModel):
+    byte_size: int | None = Field(default=None, ge=0)
+
+
+class UploadCompleted(BaseModel):
+    asset_id: str
+    upload_id: str
+    status: str
+
+
 class AssetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -436,11 +446,44 @@ def create_app(
         require_membership(payload.organization_id, user_id, db)
         asset_id = str(uuid.uuid4())
         upload_key = f"organizations/{payload.organization_id}/assets/{asset_id}/{payload.original_filename}"
-        asset = Asset(id=asset_id, organization_id=payload.organization_id, original_filename=payload.original_filename, media_type=payload.media_type, upload_key=upload_key)
-        job = ProcessingJob(asset_id=asset_id)
+        asset = Asset(id=asset_id, organization_id=payload.organization_id, original_filename=payload.original_filename, media_type=payload.media_type, upload_key=upload_key, status="uploading")
+        job = ProcessingJob(asset_id=asset_id, stage="upload", status="uploading")
         db.add_all([asset, job])
         db.commit()
         return UploadInitiated(asset_id=asset_id, upload_id=job.id, upload_key=upload_key, status=asset.status)
+
+    @app.post("/api/v1/uploads/{upload_id}/complete", response_model=UploadCompleted)
+    def complete_upload(upload_id: str, payload: UploadComplete, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> UploadCompleted:
+        job = db.get(ProcessingJob, upload_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Upload not found")
+        asset = get_asset_or_404(job.asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        if asset.status != "uploading":
+            raise HTTPException(status_code=409, detail="Upload is not awaiting completion")
+        asset.status = "processing"
+        asset.byte_size = payload.byte_size
+        job.stage = "queued"
+        job.status = "queued"
+        job.progress = 0
+        db.commit()
+        return UploadCompleted(asset_id=asset.id, upload_id=job.id, status=asset.status)
+
+    @app.post("/api/v1/uploads/{upload_id}/abort", status_code=status.HTTP_204_NO_CONTENT)
+    def abort_upload(upload_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> None:
+        job = db.get(ProcessingJob, upload_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Upload not found")
+        asset = get_asset_or_404(job.asset_id, db)
+        require_membership(asset.organization_id, user_id, db)
+        if asset.status != "uploading":
+            raise HTTPException(status_code=409, detail="Upload can no longer be aborted")
+        asset.status = "failed"
+        asset.error_message = "Upload aborted"
+        job.stage = "upload"
+        job.status = "failed"
+        job.error_message = asset.error_message
+        db.commit()
 
     @app.get("/api/v1/assets", response_model=list[AssetOut])
     def list_assets(organization_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[Asset]:
@@ -560,7 +603,7 @@ def create_app(
         job = db.scalar(select(ProcessingJob).where(ProcessingJob.asset_id == asset_id).order_by(ProcessingJob.created_at.desc()))
         if not job:
             raise HTTPException(status_code=404, detail="Processing job not found")
-        asset.status = payload.status
+        asset.status = "ready" if payload.status == "completed" else payload.status
         asset.byte_size = payload.byte_size if payload.byte_size is not None else asset.byte_size
         asset.duration_ms = payload.duration_ms if payload.duration_ms is not None else asset.duration_ms
         asset.width = payload.width if payload.width is not None else asset.width
