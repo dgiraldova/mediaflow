@@ -69,15 +69,58 @@ repository root. No secret is ever read from a file in source control.
 adapter for that provider, so the full pipeline runs offline without spending
 API credits. Production deployments must set them all.
 
+## Running the full demo
+
+Three processes. From the repository root:
+
+**1. Member B's API**
+
+```bash
+MEDIAFLOW_INTERNAL_WORKER_TOKEN=dev-token MEDIAFLOW_MEDIA_BASE_URL=http://127.0.0.1:8001 python -m uvicorn app.main:create_app --factory --port 3000
+```
+
+**2. The ingestion poller** — claims queued uploads and processes them
+
+```bash
+cd apps/worker && MEDIAFLOW_API_BASE_URL=http://127.0.0.1:3000 MEDIAFLOW_API_INTERNAL_TOKEN=dev-token .venv/Scripts/python -m worker.poller --simulate
+```
+
+**3. The media server** — only needed for actual video playback
+
+```bash
+cd apps/worker && .venv/Scripts/python -m worker.media_server
+```
+
+Upload through the UI and the asset moves `processing` → `ready` on its own,
+with transcript, moments, search results and a playback URL.
+
+### `--simulate`
+
+Without it the poller downloads the uploaded file from R2/MinIO and runs real
+FFprobe, FFmpeg and AI providers — that needs storage configured and FFmpeg on
+`PATH`. With it, **no media is processed**: metadata, transcripts and moments
+are synthetic placeholders so the UI flow can be demonstrated before storage
+exists. It logs a warning on every start; never run it in production.
+
+Drop `--simulate` and set the `R2_*` variables once MinIO is running
+(`docker compose -f infrastructure/docker/media/docker-compose.media.yml up`).
+
 ## Integration with Member B's API
 
-The worker persists through the internal worker endpoints in `app/main.py`:
+The worker claims work from and persists through the internal endpoints in
+`app/main.py`:
 
 ```text
-PATCH /api/v1/internal/assets/{asset_id}/processing   status, metadata, derivative keys
+POST  /api/v1/internal/workflows/ingest               claim queued jobs
+PATCH /api/v1/internal/assets/{asset_id}/processing   status, metadata, checksum,
+                                                      provider id, derivative keys
 PUT   /api/v1/internal/assets/{asset_id}/transcript   transcript segments
 PUT   /api/v1/internal/assets/{asset_id}/moments      searchable moments
 ```
+
+Duplicate detection is server-side: the worker sends the SHA-256 it computed,
+and the API returns 409 if another asset in the organization already has it.
+The poller turns that into a `duplicate_asset` failure the user can see.
 
 `worker/repositories/http_api.py` implements the repository Protocols against
 them, and `worker/repositories/api_mapping.py` handles the schema differences

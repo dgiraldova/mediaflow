@@ -9,3 +9,4 @@ mediaflow-demo.db
 # Worker (Member C)
 apps/worker/.venv/
 demo-pipeline.db
+e2e.db

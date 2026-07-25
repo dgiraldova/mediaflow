@@ -63,6 +63,22 @@ class ApiClient:
         )
         return cls(client)
 
+    async def claim_ingestion_work(
+        self, *, worker_id: str, limit: int = 1
+    ) -> list[dict[str, object]]:
+        """Claim queued ingestion jobs.
+
+        The API flips each returned job to ``processing`` as it hands it over,
+        so a claimed job is not re-issued to another worker.
+        """
+        response = await self._client.post(
+            "/api/v1/internal/workflows/ingest",
+            json={"worker_id": worker_id, "limit": limit},
+        )
+        response.raise_for_status()
+        jobs: list[dict[str, object]] = response.json().get("jobs", [])
+        return jobs
+
     async def patch_processing(self, asset_id: str, payload: dict[str, object]) -> dict:
         response = await self._client.patch(
             f"/api/v1/internal/assets/{asset_id}/processing", json=payload
@@ -154,9 +170,11 @@ class HttpAssetRepository:
         checksum_sha256: str,
     ) -> Asset:
         payload = self._base_payload(asset_id)
-        payload.update(
-            {"duration_ms": duration_ms, "width": width, "height": height}
-        )
+        payload.update({"duration_ms": duration_ms, "width": width, "height": height})
+        if checksum_sha256:
+            # The API rejects a checksum that already belongs to another asset
+            # in the organization (409), which is how duplicate detection works.
+            payload["checksum_sha256"] = checksum_sha256
         await self._api.patch_processing(asset_id, payload)
         return Asset(
             id=asset_id,
@@ -198,13 +216,9 @@ class HttpAssetRepository:
     async def update_provider_asset_id(
         self, *, organization_id: str, asset_id: str, provider_asset_id: str
     ) -> Asset:
-        # No column for this in Member B's schema yet. Log it so the value is
-        # recoverable from worker logs until one exists.
-        logger.info(
-            "asset.provider_id_not_persisted",
-            asset_id=asset_id,
-            provider_asset_id=provider_asset_id,
-        )
+        payload = self._base_payload(asset_id)
+        payload["provider_asset_id"] = provider_asset_id
+        await self._api.patch_processing(asset_id, payload)
         return _stub_asset(asset_id, organization_id)
 
     async def update_status(

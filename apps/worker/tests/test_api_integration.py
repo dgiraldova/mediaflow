@@ -175,7 +175,7 @@ async def test_processing_updates_move_asset_to_ready(clients, repos):
         width=1920,
         height=1080,
         orientation="horizontal",
-        checksum_sha256="abc123",
+        checksum_sha256="b" * 64,  # the API requires 64 hex chars
     )
     await repos["asset"].update_storage_keys(
         organization_id=ORG,
