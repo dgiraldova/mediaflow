@@ -72,3 +72,26 @@ def test_frontend_error_envelope_and_cors(tmp_path):
         assert response.json()["message"] == "Bearer token is required"
         assert response.json()["details"]["request_id"]
         assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_search_and_collections_are_scoped_to_authenticated_organization(tmp_path):
+    with client(tmp_path) as api:
+        session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
+        headers = {"Authorization": f"Bearer {session.json()['access_token']}"}
+
+        search = api.post("/api/v1/search", headers=headers, json={"query": "easy onboarding"})
+        assert search.status_code == 200
+        result = search.json()["results"][0]
+        assert result["asset_id"] == "customer-story"
+        assert result["match_reasons"]
+
+        created = api.post("/api/v1/collections", headers=headers, json={"name": "Customer voice", "description": "Useful proof points"})
+        assert created.status_code == 201
+        collection_id = created.json()["id"]
+        added = api.post(f"/api/v1/collections/{collection_id}/items", headers=headers, json={"moment_id": result["moment_id"]})
+        assert added.status_code == 201
+        assert added.json()["item_count"] == 1
+
+        items = api.get("/api/v1/collections", headers=headers)
+        assert items.status_code == 200
+        assert items.json()[0]["name"] == "Customer voice"

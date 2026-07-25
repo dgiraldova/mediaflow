@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, select
+from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -120,6 +120,26 @@ class MediaMoment(Base):
     end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     category: Mapped[str] = mapped_column(String(100), nullable=False)
     score: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class Collection(Base):
+    __tablename__ = "collections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class CollectionItem(Base):
+    __tablename__ = "collection_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    collection_id: Mapped[str] = mapped_column(ForeignKey("collections.id"), index=True)
+    moment_id: Mapped[str] = mapped_column(ForeignKey("media_moments.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Role(StrEnum):
@@ -231,6 +251,45 @@ class MomentOut(BaseModel):
     score: int
 
 
+class SearchInput(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    organization_id: str | None = None
+
+
+class SearchResultOut(BaseModel):
+    asset_id: str
+    moment_id: str
+    title: str
+    start_ms: int
+    end_ms: int
+    excerpt: str
+    match_reasons: list[str]
+    score: float
+
+
+class SearchResponse(BaseModel):
+    search_id: str
+    results: list[SearchResultOut]
+
+
+class CollectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    organization_id: str | None = None
+
+
+class CollectionItemCreate(BaseModel):
+    moment_id: str
+
+
+class CollectionOut(BaseModel):
+    id: str
+    organization_id: str
+    name: str
+    description: str | None
+    item_count: int
+
+
 def make_engine(database_url: str) -> Engine:
     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
     return create_engine(database_url, connect_args=connect_args)
@@ -309,6 +368,19 @@ def create_app(
         if not membership:
             raise HTTPException(status_code=403, detail="You do not have access to this organization")
         return membership
+
+    def organization_for_request(organization_id: str | None, user_id: str, db: Session) -> str:
+        if organization_id:
+            require_membership(organization_id, user_id, db)
+            return organization_id
+        membership = db.scalar(
+            select(OrganizationMember)
+            .where(OrganizationMember.user_id == user_id)
+            .order_by(OrganizationMember.created_at)
+        )
+        if not membership:
+            raise HTTPException(status_code=403, detail="You do not belong to an organization")
+        return membership.organization_id
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -393,6 +465,86 @@ def create_app(
         require_membership(asset.organization_id, user_id, db)
         return list(db.scalars(select(MediaMoment).where(MediaMoment.asset_id == asset_id).order_by(MediaMoment.start_ms)))
 
+    @app.post("/api/v1/search", response_model=SearchResponse)
+    def search(payload: SearchInput, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> SearchResponse:
+        organization_id = organization_for_request(payload.organization_id, user_id, db)
+        terms = {term for term in payload.query.lower().split() if len(term) > 2}
+        candidates = list(
+            db.execute(
+                select(MediaMoment, Asset)
+                .join(Asset, MediaMoment.asset_id == Asset.id)
+                .where(Asset.organization_id == organization_id)
+            )
+        )
+        results: list[SearchResultOut] = []
+        for moment, asset in candidates:
+            segment = db.scalar(
+                select(TranscriptSegment)
+                .where(TranscriptSegment.asset_id == asset.id, TranscriptSegment.start_ms <= moment.end_ms, TranscriptSegment.end_ms >= moment.start_ms)
+                .order_by(TranscriptSegment.start_ms)
+            )
+            excerpt = segment.text if segment else moment.title
+            searchable = f"{moment.title} {moment.category} {excerpt}".lower()
+            matched_terms = sorted(term for term in terms if term in searchable)
+            if terms and not matched_terms:
+                continue
+            score = round(len(matched_terms) / max(len(terms), 1), 2)
+            results.append(
+                SearchResultOut(
+                    asset_id=asset.id,
+                    moment_id=moment.id,
+                    title=moment.title,
+                    start_ms=moment.start_ms,
+                    end_ms=moment.end_ms,
+                    excerpt=excerpt,
+                    match_reasons=[f"Matched: {', '.join(matched_terms)}"] if matched_terms else ["Browse result"],
+                    score=score,
+                )
+            )
+        results.sort(key=lambda item: item.score, reverse=True)
+        return SearchResponse(search_id=str(uuid.uuid4()), results=results)
+
+    @app.get("/api/v1/collections", response_model=list[CollectionOut])
+    def list_collections(organization_id: str | None = None, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[CollectionOut]:
+        org_id = organization_for_request(organization_id, user_id, db)
+        collections = list(db.scalars(select(Collection).where(Collection.organization_id == org_id).order_by(Collection.updated_at.desc())))
+        return [collection_output(collection, db) for collection in collections]
+
+    @app.post("/api/v1/collections", response_model=CollectionOut, status_code=status.HTTP_201_CREATED)
+    def create_collection(payload: CollectionCreate, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> CollectionOut:
+        org_id = organization_for_request(payload.organization_id, user_id, db)
+        collection = Collection(organization_id=org_id, name=payload.name, description=payload.description)
+        db.add(collection)
+        db.commit()
+        db.refresh(collection)
+        return collection_output(collection, db)
+
+    @app.post("/api/v1/collections/{collection_id}/items", response_model=CollectionOut, status_code=status.HTTP_201_CREATED)
+    def add_collection_item(collection_id: str, payload: CollectionItemCreate, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> CollectionOut:
+        collection = get_collection_or_404(collection_id, db)
+        require_membership(collection.organization_id, user_id, db)
+        moment = db.get(MediaMoment, payload.moment_id)
+        if not moment:
+            raise HTTPException(status_code=404, detail="Moment not found")
+        asset = get_asset_or_404(moment.asset_id, db)
+        if asset.organization_id != collection.organization_id:
+            raise HTTPException(status_code=403, detail="Moment belongs to another organization")
+        if db.scalar(select(CollectionItem).where(CollectionItem.collection_id == collection_id, CollectionItem.moment_id == moment.id)):
+            raise HTTPException(status_code=409, detail="Moment is already in this collection")
+        db.add(CollectionItem(collection_id=collection_id, moment_id=moment.id))
+        db.commit()
+        return collection_output(collection, db)
+
+    @app.delete("/api/v1/collections/{collection_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def remove_collection_item(collection_id: str, item_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> None:
+        collection = get_collection_or_404(collection_id, db)
+        require_membership(collection.organization_id, user_id, db)
+        item = db.get(CollectionItem, item_id)
+        if not item or item.collection_id != collection_id:
+            raise HTTPException(status_code=404, detail="Collection item not found")
+        db.delete(item)
+        db.commit()
+
     @app.get("/api/v1/assets/{asset_id}/processing-job", response_model=ProcessingJobOut)
     def get_processing_job(asset_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> ProcessingJob:
         asset = get_asset_or_404(asset_id, db)
@@ -456,6 +608,24 @@ def get_asset_or_404(asset_id: str, db: Session) -> Asset:
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     return asset
+
+
+def get_collection_or_404(collection_id: str, db: Session) -> Collection:
+    collection = db.get(Collection, collection_id)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return collection
+
+
+def collection_output(collection: Collection, db: Session) -> CollectionOut:
+    item_count = db.scalar(select(func.count()).select_from(CollectionItem).where(CollectionItem.collection_id == collection.id))
+    return CollectionOut(
+        id=collection.id,
+        organization_id=collection.organization_id,
+        name=collection.name,
+        description=collection.description,
+        item_count=item_count or 0,
+    )
 
 
 def error_code(status_code: int) -> str:
