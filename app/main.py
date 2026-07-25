@@ -314,6 +314,7 @@ class SearchInput(BaseModel):
 
 class SearchResultOut(BaseModel):
     asset_id: str
+    asset_name: str
     moment_id: str
     title: str
     start_ms: int
@@ -613,6 +614,7 @@ def create_app(
             results.append(
                 SearchResultOut(
                     asset_id=asset.id,
+                    asset_name=asset.original_filename,
                     moment_id=moment.id,
                     title=moment.title,
                     start_ms=moment.start_ms,
