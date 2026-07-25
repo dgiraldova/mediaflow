@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, delete, func, select
+from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, delete, func, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -83,6 +83,8 @@ class Asset(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_asset_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -194,6 +196,7 @@ class UploadInitiated(BaseModel):
 
 class UploadComplete(BaseModel):
     byte_size: int | None = Field(default=None, ge=0)
+    checksum_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
 
 
 class UploadCompleted(BaseModel):
@@ -214,6 +217,8 @@ class AssetOut(BaseModel):
     duration_ms: int | None
     width: int | None
     height: int | None
+    checksum_sha256: str | None
+    provider_asset_id: str | None
     error_message: str | None
 
 
@@ -235,6 +240,8 @@ class ProcessingUpdate(BaseModel):
     duration_ms: int | None = Field(default=None, ge=0)
     width: int | None = Field(default=None, ge=0)
     height: int | None = Field(default=None, ge=0)
+    checksum_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    provider_asset_id: str | None = Field(default=None, max_length=255)
     proxy_key: str | None = Field(default=None, max_length=500)
     thumbnail_key: str | None = Field(default=None, max_length=500)
     error_message: str | None = Field(default=None, max_length=500)
@@ -243,6 +250,25 @@ class ProcessingUpdate(BaseModel):
 class PlaybackUrlOut(BaseModel):
     url: str
     expires_in: int = 300
+
+
+class IngestionClaimRequest(BaseModel):
+    worker_id: str = Field(default="local-worker", min_length=1, max_length=120)
+    limit: int = Field(default=1, ge=1, le=10)
+
+
+class IngestionWorkItem(BaseModel):
+    asset_id: str
+    job_id: str
+    organization_id: str
+    upload_key: str
+    original_filename: str
+    media_type: str
+    byte_size: int | None
+
+
+class IngestionClaimResponse(BaseModel):
+    jobs: list[IngestionWorkItem]
 
 
 class WorkerTranscriptSegment(BaseModel):
@@ -368,6 +394,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         Base.metadata.create_all(engine)
+        ensure_demo_schema(engine)
         with session_factory() as db:
             seed_demo_data(db)
         yield
@@ -391,7 +418,7 @@ def create_app(
 
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, exc: HTTPException):
-        return error_response(request, exc.status_code, str(exc.detail), error_code(exc.status_code))
+        return error_response(request, exc.status_code, str(exc.detail), error_code(exc.status_code, str(exc.detail)))
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, _: RequestValidationError):
@@ -510,6 +537,7 @@ def create_app(
         require_membership(asset.organization_id, user_id, db)
         if asset.status != "uploading":
             raise HTTPException(status_code=409, detail="Upload is not awaiting completion")
+        assign_checksum(asset, payload.checksum_sha256, db)
         asset.status = "processing"
         asset.byte_size = payload.byte_size
         job.stage = "queued"
@@ -533,6 +561,37 @@ def create_app(
         job.status = "failed"
         job.error_message = asset.error_message
         db.commit()
+
+    @app.post("/api/v1/internal/workflows/ingest", response_model=IngestionClaimResponse, dependencies=[Depends(require_internal_token)])
+    @app.post("/api/v1/internal/workflows/ingest/claim", response_model=IngestionClaimResponse, dependencies=[Depends(require_internal_token)])
+    def claim_ingestion_work(payload: IngestionClaimRequest, db: Session = Depends(get_db)) -> IngestionClaimResponse:
+        queued = list(
+            db.execute(
+                select(ProcessingJob, Asset)
+                .join(Asset, ProcessingJob.asset_id == Asset.id)
+                .where(ProcessingJob.status == "queued", Asset.status == "processing")
+                .order_by(ProcessingJob.created_at)
+                .limit(payload.limit)
+            )
+        )
+        jobs: list[IngestionWorkItem] = []
+        for job, asset in queued:
+            job.stage = "preparing_file"
+            job.status = "processing"
+            job.progress = 15
+            jobs.append(
+                IngestionWorkItem(
+                    asset_id=asset.id,
+                    job_id=job.id,
+                    organization_id=asset.organization_id,
+                    upload_key=asset.upload_key,
+                    original_filename=asset.original_filename,
+                    media_type=asset.media_type,
+                    byte_size=asset.byte_size,
+                )
+            )
+        db.commit()
+        return IngestionClaimResponse(jobs=jobs)
 
     @app.get("/api/v1/assets", response_model=list[AssetOut])
     def list_assets(organization_id: str, user_id: str = Depends(current_user), db: Session = Depends(get_db)) -> list[Asset]:
@@ -731,6 +790,8 @@ def create_app(
         asset.duration_ms = payload.duration_ms if payload.duration_ms is not None else asset.duration_ms
         asset.width = payload.width if payload.width is not None else asset.width
         asset.height = payload.height if payload.height is not None else asset.height
+        assign_checksum(asset, payload.checksum_sha256, db)
+        asset.provider_asset_id = payload.provider_asset_id if payload.provider_asset_id is not None else asset.provider_asset_id
         asset.error_message = payload.error_message
         job.stage, job.status, job.progress, job.error_message = payload.stage, payload.status, payload.progress, payload.error_message
         if payload.proxy_key is not None or payload.thumbnail_key is not None:
@@ -745,6 +806,23 @@ def create_app(
         return job
 
     return app
+
+
+def ensure_demo_schema(engine: Engine) -> None:
+    """Apply the two additive SQLite columns needed by the local demo.
+
+    Production moves to Alembic/Supabase migrations; this keeps existing local
+    demo databases usable while the MVP remains SQLite-backed.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    existing_columns = {column["name"] for column in inspect(engine).get_columns("assets")}
+    with engine.begin() as connection:
+        if "checksum_sha256" not in existing_columns:
+            connection.execute(text("ALTER TABLE assets ADD COLUMN checksum_sha256 VARCHAR(64)"))
+        if "provider_asset_id" not in existing_columns:
+            connection.execute(text("ALTER TABLE assets ADD COLUMN provider_asset_id VARCHAR(255)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_assets_org_checksum ON assets (organization_id, checksum_sha256)"))
 
 
 def seed_demo_data(db: Session) -> None:
@@ -783,6 +861,22 @@ def get_asset_or_404(asset_id: str, db: Session) -> Asset:
     return asset
 
 
+def assign_checksum(asset: Asset, checksum_sha256: str | None, db: Session) -> None:
+    if checksum_sha256 is None:
+        return
+    normalized = checksum_sha256.lower()
+    duplicate = db.scalar(
+        select(Asset).where(
+            Asset.organization_id == asset.organization_id,
+            Asset.checksum_sha256 == normalized,
+            Asset.id != asset.id,
+        )
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="An identical asset already exists in this organization")
+    asset.checksum_sha256 = normalized
+
+
 def get_collection_or_404(collection_id: str, db: Session) -> Collection:
     collection = db.get(Collection, collection_id)
     if not collection:
@@ -814,7 +908,9 @@ def collection_output(collection: Collection, db: Session) -> CollectionOut:
     )
 
 
-def error_code(status_code: int) -> str:
+def error_code(status_code: int, detail: str = "") -> str:
+    if status_code == 409 and "identical asset" in detail:
+        return "duplicate_asset"
     return {401: "authentication_error", 403: "authorization_error", 404: "not_found", 409: "conflict"}.get(status_code, "request_error")
 
 
