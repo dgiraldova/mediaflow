@@ -79,6 +79,22 @@ Set `MEDIAFLOW_MEDIA_BASE_URL` to Team C's local server or media CDN. The
 frontend can then obtain the proxy through `GET /api/v1/assets/{asset_id}/playback-url`.
 Failed assets can be returned to Team C's queue with `POST /api/v1/assets/{asset_id}/retry`.
 
+## Transcript and moment handoff
+
+After transcription and moment generation, Team C replaces the canonical
+search data through these internal-token endpoints:
+
+```text
+PUT /api/v1/internal/assets/{asset_id}/transcript
+PUT /api/v1/internal/assets/{asset_id}/moments
+```
+
+Transcript payloads contain `segments` with `start_ms`, `end_ms`, optional
+`speaker`, and `text`. Moment payloads contain `moments` with a stable `id`,
+`title`, timestamps, `category`, and score from 0 to 100. Repeating an
+identical payload is idempotent; the persisted transcript and moments become
+available through the public asset and search endpoints immediately.
+
 After the browser has uploaded directly to storage, it calls
 `POST /api/v1/uploads/{upload_id}/complete` with an optional `byte_size`.
 This moves the asset from `uploading` to `processing`; Team C then reports

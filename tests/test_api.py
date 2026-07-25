@@ -67,6 +67,25 @@ def test_worker_derivatives_enable_playback_and_retry(tmp_path):
         assert retry.json()["status"] == "queued"
 
 
+def test_worker_can_idempotently_persist_transcript_and_moments_for_search(tmp_path):
+    with client(tmp_path) as api:
+        asset = api.post("/api/v1/uploads/initiate", headers={"X-User-Id": "demo-user"}, json={"organization_id": "demo-org", "original_filename": "retention.mp4", "media_type": "video"}).json()
+        worker = {"X-Internal-Token": "worker-secret"}
+        transcript_payload = {"segments": [{"start_ms": 1000, "end_ms": 5000, "speaker": "Customer", "text": "We retained more customers after the onboarding changes."}]}
+        transcript = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/transcript", headers=worker, json=transcript_payload)
+        assert transcript.status_code == 200
+        assert transcript.json() == {"count": 1}
+
+        moments_payload = {"moments": [{"id": "retention-moment", "title": "Higher customer retention", "start_ms": 1000, "end_ms": 5000, "category": "Testimonial", "score": 95}]}
+        first = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/moments", headers=worker, json=moments_payload)
+        second = api.put(f"/api/v1/internal/assets/{asset['asset_id']}/moments", headers=worker, json=moments_payload)
+        assert first.json() == second.json() == {"count": 1}
+
+        session = api.post("/api/v1/auth/login", json={"email": "alex@northstar.studio", "password": "mediaflow-demo"})
+        results = api.post("/api/v1/search", headers={"Authorization": f"Bearer {session.json()['access_token']}"}, json={"query": "retained customers"})
+        assert any(result["moment_id"] == "retention-moment" for result in results.json()["results"])
+
+
 def test_org_isolation_and_internal_token(tmp_path):
     with client(tmp_path) as api:
         created = api.post("/api/v1/organizations", headers={"X-User-Id": "other-user"}, json={"name": "Other", "slug": "other"})

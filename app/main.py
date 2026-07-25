@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, func, select
+from sqlalchemy import DateTime, ForeignKey, Integer, String, create_engine, delete, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -243,6 +243,34 @@ class ProcessingUpdate(BaseModel):
 class PlaybackUrlOut(BaseModel):
     url: str
     expires_in: int = 300
+
+
+class WorkerTranscriptSegment(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    speaker: str | None = Field(default=None, max_length=120)
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class WorkerTranscriptReplace(BaseModel):
+    segments: list[WorkerTranscriptSegment] = Field(max_length=2_000)
+
+
+class WorkerMoment(BaseModel):
+    id: str = Field(min_length=1, max_length=36)
+    title: str = Field(min_length=1, max_length=255)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    category: str = Field(min_length=1, max_length=100)
+    score: int = Field(ge=0, le=100)
+
+
+class WorkerMomentsReplace(BaseModel):
+    moments: list[WorkerMoment] = Field(max_length=500)
+
+
+class PersistedCount(BaseModel):
+    count: int
 
 
 class LoginInput(BaseModel):
@@ -647,6 +675,49 @@ def create_app(
             raise HTTPException(status_code=404, detail="Processing job not found")
         return job
 
+    @app.put("/api/v1/internal/assets/{asset_id}/transcript", response_model=PersistedCount, dependencies=[Depends(require_internal_token)])
+    def replace_transcript(asset_id: str, payload: WorkerTranscriptReplace, db: Session = Depends(get_db)) -> PersistedCount:
+        get_asset_or_404(asset_id, db)
+        validate_time_ranges(payload.segments)
+        db.execute(delete(TranscriptSegment).where(TranscriptSegment.asset_id == asset_id))
+        db.add_all(
+            TranscriptSegment(
+                asset_id=asset_id,
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                speaker=segment.speaker,
+                text=segment.text,
+            )
+            for segment in payload.segments
+        )
+        db.commit()
+        return PersistedCount(count=len(payload.segments))
+
+    @app.put("/api/v1/internal/assets/{asset_id}/moments", response_model=PersistedCount, dependencies=[Depends(require_internal_token)])
+    def replace_moments(asset_id: str, payload: WorkerMomentsReplace, db: Session = Depends(get_db)) -> PersistedCount:
+        get_asset_or_404(asset_id, db)
+        validate_time_ranges(payload.moments)
+        existing = {moment.id: moment for moment in db.scalars(select(MediaMoment).where(MediaMoment.asset_id == asset_id))}
+        incoming_ids = {moment.id for moment in payload.moments}
+        for moment_id, moment in existing.items():
+            if moment_id not in incoming_ids:
+                db.execute(delete(CollectionItem).where(CollectionItem.moment_id == moment_id))
+                db.delete(moment)
+        for item in payload.moments:
+            moment = existing.get(item.id)
+            if moment:
+                moment.title = item.title
+                moment.start_ms = item.start_ms
+                moment.end_ms = item.end_ms
+                moment.category = item.category
+                moment.score = item.score
+            else:
+                if db.get(MediaMoment, item.id):
+                    raise HTTPException(status_code=409, detail="Moment identifier belongs to another asset")
+                db.add(MediaMoment(id=item.id, asset_id=asset_id, title=item.title, start_ms=item.start_ms, end_ms=item.end_ms, category=item.category, score=item.score))
+        db.commit()
+        return PersistedCount(count=len(payload.moments))
+
     @app.patch("/api/v1/internal/assets/{asset_id}/processing", response_model=ProcessingJobOut, dependencies=[Depends(require_internal_token)])
     def update_processing(asset_id: str, payload: ProcessingUpdate, db: Session = Depends(get_db)) -> ProcessingJob:
         asset = get_asset_or_404(asset_id, db)
@@ -722,6 +793,12 @@ def validate_storage_key(key: str | None) -> None:
         return
     if key.startswith("/") or ".." in key.split("/"):
         raise HTTPException(status_code=422, detail="Storage key must be a relative object key")
+
+
+def validate_time_ranges(items: list[WorkerTranscriptSegment] | list[WorkerMoment]) -> None:
+    for item in items:
+        if item.end_ms <= item.start_ms:
+            raise HTTPException(status_code=422, detail="End time must be after start time")
 
 
 def collection_output(collection: Collection, db: Session) -> CollectionOut:
